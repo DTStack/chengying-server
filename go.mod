@@ -72,7 +72,6 @@ require (
 	github.com/yudai/gojsondiff v1.0.0 // indirect
 	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
-	//gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey/v2 v2.1.1
 	go.uber.org/zap v1.14.1
 	golang.org/x/lint v0.0.0-20191125180803-fdd1cda4f05f // indirect
 	golang.org/x/sys v0.0.0-20220207234003-57398862261d // indirect
