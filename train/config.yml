@@ -1,0 +1,53 @@
+# logger
+log.dir: /tmp/train
+log.max-logger-size: 100
+log.max-logger-backups: 3
+log.days-to-keep: 1
+
+# databases
+mysqldb.host: 172.16.10.221
+mysqldb.port: 3306
+mysqldb.user: root
+mysqldb.password: dtstack
+mysqldb.dbname: dtagent
+
+#agent
+agent.host: 172.16.10.221:8889
+#em docker-compose.yml path
+em.docker-compose: /opt/dtstack/easymanager/docker-compose.yml
+
+#start in order
+operators:
+- product-name: DTinsight
+  action: start
+  order:
+  - "Batch"
+  - "Stream"
+  - "Valid"
+  - "API"
+  - "Analysis"
+  - "Datascience"
+  - "Tag"
+  - "Engine"
+  - "Schedule"
+  - "Gateway"
+  - "Console"
+  - "Modelservice"
+  - "Dtuic"
+
+- product-name: DTinsight
+  action: stop
+  order:
+  - "Batch"
+  - "Stream"
+  - "Valid"
+  - "API"
+  - "Analysis"
+  - "Datascience"
+  - "Tag"
+  - "Engine"
+  - "Schedule"
+  - "Gateway"
+  - "Console"
+  - "Modelservice"
+  - "Dtuic"

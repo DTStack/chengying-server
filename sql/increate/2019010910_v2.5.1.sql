@@ -1,0 +1,1 @@
+alter table deploy_product_list add COLUMN alert_recover tinyint(1) NOT NULL default '0' COMMENT '0，不恢复告警，1，恢复告警';
