@@ -5,10 +5,10 @@ log.max-logger-backups: 3
 log.days-to-keep: 1
 
 # databases
-mysqldb.host: 172.16.82.176
+mysqldb.host: 127.0.0.1
 mysqldb.port: 3306
 mysqldb.user: root
-mysqldb.password: DT#passw0rd2019
+mysqldb.password: 123456
 mysqldb.dbname: dtagent
 
 # api

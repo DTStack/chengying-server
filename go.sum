@@ -996,14 +996,6 @@ github.com/yudai/pp v2.0.1+incompatible/go.mod h1:PuxR/8QJ7cyCkFp/aUDS+JY727OFEZ
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.3.5/go.mod h1:mwnBkeHKe2W/ZEtQ+71ViKU8L12m81fl3OWwC1Zlc8k=
 github.com/yuin/goldmark v1.4.0/go.mod h1:mwnBkeHKe2W/ZEtQ+71ViKU8L12m81fl3OWwC1Zlc8k=
-gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey v2.0.1+incompatible h1:nsBWRRdGarc2fLs0CTexV1Ynb/m+vgEGs6OKD41MUTY=
-gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey v2.0.1+incompatible/go.mod h1:NyPt58EZLy9Vrf0DIJ208xfm/WCTRkcGwIVkDbwvnzg=
-gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey v2.0.2+incompatible h1:Eig7yK6RRXLjFzHMvafOehx6kMidAQz37RRQVOr7ebU=
-gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey v2.0.2+incompatible/go.mod h1:NyPt58EZLy9Vrf0DIJ208xfm/WCTRkcGwIVkDbwvnzg=
-gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey/v2 v2.1.0 h1:78vEsShOZXoc3KGBWZ/xcu2uU/grQMeNFye3074g7/w=
-gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey/v2 v2.1.0/go.mod h1:TjfwfZj01KmpVqvbYjRSp9GSjYrFjA7tW2AKS8KZRhM=
-gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey/v2 v2.1.1 h1:8CJqjbC0QJFqcuVR9DvlbE2yJu0T1f7O9CAFr6tC8FE=
-gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey/v2 v2.1.1/go.mod h1:TjfwfZj01KmpVqvbYjRSp9GSjYrFjA7tW2AKS8KZRhM=
 go.elastic.co/apm v1.5.0/go.mod h1:OdB9sPtM6Vt7oz3VXt7+KR96i9li74qrxBGHTQygFvk=
 go.elastic.co/apm/module/apmhttp v1.5.0/go.mod h1:1FbmNuyD3ddauwzgVwFB0fqY6KbZt3JkV187tGCYYhY=
 go.elastic.co/apm/module/apmot v1.5.0/go.mod h1:d2KYwhJParTpyw2WnTNy8geNlHKKFX+4oK3YLlsesWE=

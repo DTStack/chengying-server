@@ -90,6 +90,7 @@ require (
 	sigs.k8s.io/controller-runtime v0.6.0
 	sigs.k8s.io/controller-tools v0.4.1 // indirect
 	sigs.k8s.io/yaml v1.2.0
+	github.com/wangqi811/gomonkey/v2 v2.1.0
 )
 
 replace k8s.io/client-go => k8s.io/client-go v0.18.2
