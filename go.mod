@@ -66,6 +66,7 @@ require (
 	github.com/swaggo/swag v1.7.9
 	github.com/tjfoc/gmsm v1.4.1
 	github.com/urfave/cli v1.20.0
+	github.com/wangqi811/gomonkey/v2 v2.1.0
 	github.com/wcharczuk/go-chart/v2 v2.1.0
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
 	github.com/yalp/jsonpath v0.0.0-20180802001716-5cc68e5049a0 // indirect
@@ -73,7 +74,6 @@ require (
 	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
 	go.uber.org/zap v1.14.1
-	golang.org/x/lint v0.0.0-20191125180803-fdd1cda4f05f // indirect
 	golang.org/x/sys v0.0.0-20220207234003-57398862261d // indirect
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0
 	google.golang.org/genproto v0.0.0-20220207185906-7721543eae58 // indirect
@@ -90,7 +90,6 @@ require (
 	sigs.k8s.io/controller-runtime v0.6.0
 	sigs.k8s.io/controller-tools v0.4.1 // indirect
 	sigs.k8s.io/yaml v1.2.0
-	github.com/wangqi811/gomonkey/v2 v2.1.0
 )
 
 replace k8s.io/client-go => k8s.io/client-go v0.18.2
