@@ -94,6 +94,18 @@ var TaskOperationEasyMatrixAPIRoutes = apibase.Route{
 					},
 				},
 			}, {
+				//http://xxxx/api/v2/task/{id:int(primary key)}/edit
+				Path: "edit",
+				Middlewares: []context.Handler{
+					apibase.CheckPermission3,
+				},
+				POST: impl.TaskEdit,
+				Docs: apibase.Docs{
+					POST: &apibase.ApiDoc{
+						Name: "编辑脚本接口[EasyMatrix API]",
+					},
+				},
+			}, {
 				//http://xxxx/api/v2/task/{id:int(primary key)}/cronParse
 				Path: "cronParse",
 				Middlewares: []context.Handler{

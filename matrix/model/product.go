@@ -193,6 +193,7 @@ func (d *deployProdcutList) GetProductListByWhere(cause dbhelper.WhereCause) ([]
 
 func (d *deployProdcutList) GetDeployProductList(pagination *apibase.Pagination,
 	parentProductName, productNames, productName, productVersionLike, productVersion, productType string) ([]DeployProductListInfo, int) {
+	fields := []string{"id", "parent_product_name", "product_name", "product_name_display", "product_version", "product_type", "status", "deploy_time", "create_time"}
 	whereCause := dbhelper.WhereCause{}
 	var values []interface{}
 	whereCause = whereCause.GreaterThan("id", "0")
@@ -231,7 +232,7 @@ func (d *deployProdcutList) GetDeployProductList(pagination *apibase.Pagination,
 		whereCause = whereCause.Equal("product_version", productVersion)
 	}
 
-	rows, totalproducts, err := d.SelectWhere(_getDeployProductListFields, whereCause, pagination)
+	rows, totalproducts, err := d.SelectWhere(fields, whereCause, pagination)
 
 	if err != nil {
 		apibase.ThrowDBModelError(err)
@@ -278,7 +279,7 @@ func (d *deployProdcutList) GetDeployProductName(productType int) []string {
 }
 
 func (d *deployProdcutList) GetProductList(productName, productType string, deployStatus []string, pagination *apibase.Pagination) ([]DeployProductListInfo, int) {
-	fields := []string{"id", "parent_product_name", "product_name", "product_name_display", "product_version", "status", "deploy_time", "create_time"}
+	fields := []string{"id", "parent_product_name", "product_name", "product_name_display", "product_version", "product_type", "status", "deploy_time", "create_time"}
 	whereCause := dbhelper.MakeWhereCause().GreaterThan("id", "0")
 	if productName != "" {
 		whereCause = whereCause.And().Equal("product_name", productName)

@@ -19,7 +19,9 @@ package impl
 
 import (
 	apibase "dtstack.com/dtstack/easymatrix/go-common/api-base"
+	"dtstack.com/dtstack/easymatrix/matrix/agent"
 	"dtstack.com/dtstack/easymatrix/matrix/base"
+	"dtstack.com/dtstack/easymatrix/matrix/cache"
 	"dtstack.com/dtstack/easymatrix/matrix/grafana"
 	"dtstack.com/dtstack/easymatrix/matrix/harole"
 	"dtstack.com/dtstack/easymatrix/matrix/log"
@@ -859,4 +861,708 @@ func GetChineseFont() *truetype.Font {
 		return nil
 	}
 	return font
+}
+
+const (
+	MYSQL_IO_RUNNING           = "mysql_slave_status_slave_io_running{cluster_name='{cluster_name}'}"
+	MYSQL_SQL_RUNNING          = "mysql_slave_status_slave_sql_running{cluster_name='{cluster_name}'}"
+	DATA_NODE_LIVE_NUM         = "Hadoop_NameNode_NumLiveDataNodes{cluster_name='{cluster_name}',name='FSNamesystem',product_name='Hadoop',service_name='hdfs_namenode'}"
+	DATA_NODE_DEAD_NUM         = "Hadoop_NameNode_NumDeadDataNodes{cluster_name='{cluster_name}',name='FSNamesystem',product_name='Hadoop',service_name='hdfs_namenode'}"
+	NAME_NODE_TOTAL_FILE       = "Hadoop_NameNode_TotalFiles{cluster_name='{cluster_name}',product_name='Hadoop',service_name='hdfs_namenode'}"
+	SERVICE_GC_FORM_TITLE      = "service_gc_statistics"
+	DIR_USAGE_FORM_TITLE       = "dir_usage_statistics"
+	ALARM_FROM_TITLE           = "alarm_indicators"
+	HDFS_FILE_USAGE_FORM_TITLE = "hdfs_file_usage"
+	CPU_USAGE_FROM_TITLE       = "cpu_usage"
+	MEM_USAGE_FROM_TITLE       = "men_usage"
+	DISK_USAGE_FROM_TITLE      = "disk_usage"
+	INODE_USAGE_FROM_TITLE     = "inode_usage"
+	SWAP_USAGE_FROM_TITLE      = "swap_usage"
+	SERVICE_GC                 = "floor(delta(jvm_gc_collection_seconds_count{cluster_name='{cluster_name}',gc='{gc_type}'}[{time}m])) >= {freq}"
+	FILE_USAGE                 = "100-node_filesystem_free{cluster_name = '{cluster_name}',mountpoint='/data'}/node_filesystem_size{cluster_name = '{cluster_name}',mountpoint='/data'} * 100 "
+	CPU_USAGE                  = "100 - ( avg(irate(node_cpu{mode='idle',cluster_name='{cluster_name}'}[5m])) by (instance) * 100 ) >= {config}"
+	INODE_USAGE                = "100*((node_filesystem_files{cluster_name='{cluster_name}',device=~'/dev/.*',mountpoint='/data'}-node_filesystem_files_free{cluster_name='{cluster_name}',device=~'/dev/.*',mountpoint='/data'})/node_filesystem_files{cluster_name='{cluster_name}',device=~'/dev/.*',mountpoint='/data'}) >= {config}"
+	DISK_USAGE                 = "(100-100*((node_filesystem_avail{cluster_name='{cluster_name}',device=~'/dev/.*',mountpoint='/data'}/node_filesystem_size{cluster_name='{cluster_name}',device=~'/dev/.*',mountpoint='/data'}))) >= {config}"
+	MEM_USAGE                  = "(1-(sum by(instance)(node_memory_MemFree+node_memory_Buffers+node_memory_Cached))/(sum by(instance)(node_memory_MemTotal)))*100 >= {config}"
+	SWAP_USAGE                 = "((sum by(instance)(node_memory_SwapTotal))-(sum by(instance)(node_memory_SwapFree))-(sum by(instance)(node_memory_SwapCached)) )/(8*1024*1024*1024) >= 0"
+)
+
+type PlatformInspectCommonParam struct {
+	ClusterId int `json:"cluster_id"`
+	From      int `json:"from"`
+	To        int `json:"to"`
+}
+
+type NodeInfo struct {
+	Total         int `json:"total"`
+	AgentErrorNum int `json:"agent_error_num"`
+	AlertingNum   int `json:"alerting_num"`
+}
+type ServiceInfo struct {
+	RunningFailNum       int `json:"running_fail_num"`
+	HostDownNum          int `json:"host_down_num"`
+	HealthyCheckErrorNum int `json:"healthy_check_error_num"`
+	AlertingNum          int `json:"alerting_num"`
+}
+type Result struct {
+	NodeStatus       NodeInfo    `json:"node_status"`
+	ServiceStatus    ServiceInfo `json:"service_status"`
+	MysqlSlaveStatus int         `json:"mysql_slave_status"`
+	HaveNameNode     int         `json:"have_name_node"`
+}
+
+// GetPlatformInspectBaseInfoState 	godoc
+// @Summary      	获取巡检报告基本信息
+// @Description  	获取巡检报告基本信息
+// @Tags         	Inspect
+// @Produce      	json
+// @Param			cluster_id query int true "Cluster ID"
+// @Success      	200		{object} 	Result
+// @Router       	/api/v2/platform/inspect/baseInfo/status [get]
+func GetPlatformInspectBaseInfoState(ctx context.Context) apibase.Result {
+	paramsErr := apibase.NewApiParameterErrors()
+	clusterId, err := ctx.URLParamInt("cluster_id")
+	if err != nil {
+		paramsErr.AppendError("$", fmt.Errorf("param cluster_id is empty"))
+	}
+	alertParam := make(map[string]string, 0)
+	err, dashboardResp := grafana.GetDashboardByUid("Ne_roaViz")
+	if err != nil {
+		log.Errorf("get host overview dashboard error: %v", err)
+	}
+	allAlerts, err := GetAlertList(alertParam)
+	alertParam = map[string]string{
+		"dashboardId": strconv.Itoa(dashboardResp.Dashboard.Id),
+	}
+	hostAlerts, err := GetAlertList(alertParam)
+
+	nodeStates, err := GetPlatformInspectBaseInfoByClusterId(clusterId, allAlerts, hostAlerts)
+	result := Result{
+		NodeStatus: NodeInfo{
+			Total:         nodeStates.NodeTotal,
+			AlertingNum:   nodeStates.AlertingNum,
+			AgentErrorNum: nodeStates.AgentErrorNum,
+		},
+		ServiceStatus: ServiceInfo{
+			AlertingNum:          nodeStates.ServiceAlertingNum,
+			HostDownNum:          nodeStates.ServiceHostDownNum,
+			HealthyCheckErrorNum: nodeStates.ServiceHealthyErrorNum,
+			RunningFailNum:       nodeStates.ServiceRunErrorNum,
+		},
+		MysqlSlaveStatus: nodeStates.MysqlSlaveStatus,
+		HaveNameNode:     nodeStates.HasNameNode,
+	}
+	return result
+}
+
+type Response struct {
+	NameNodeMem      string `json:"name_node_mem"`
+	DataNodeMem      string `json:"data_node_mem"`
+	DataNodeLiveNums int    `json:"data_node_live_nums"`
+	DataNodeDeadNums int    `json:"data_node_dead_nums"`
+	HdfsFileNum      int    `json:"hdfs_file_num"`
+}
+
+// GetPlatformInspectNameNodeBaseInfo 	godoc
+// @Summary      	大数据运行服务基础信息
+// @Description  	大数据运行服务基础信息
+// @Tags         	Inspect
+// @Produce      	json
+// @Param			cluster_id query int true "Cluster ID"
+// @Success      	200		{object} 	Response
+// @Router       	/api/v2/platform/inspect/baseInfo/name_node [get]
+func GetPlatformInspectNameNodeBaseInfo(ctx context.Context) apibase.Result {
+	var result Response
+	paramsErr := apibase.NewApiParameterErrors()
+	clusterId, err := ctx.URLParamInt("cluster_id")
+	if err != nil {
+		paramsErr.AppendError("$", fmt.Errorf("param cluster_id is empty"))
+	}
+	namenodeMem, datanodeMem, err := model.DeployInstanceList.GetNameNodeConfigByIdAndServiceName(clusterId)
+	if err != nil {
+		return err
+	}
+	datanodeLiveExpr := DATA_NODE_LIVE_NUM
+	datanodeDeadExpr := DATA_NODE_DEAD_NUM
+	namenodeTotalFileExpr := NAME_NODE_TOTAL_FILE
+	clusterInfo, err := model.DeployClusterList.GetClusterInfoById(clusterId)
+	datanodeLiveExpr = strings.Replace(datanodeLiveExpr, "{cluster_name}", clusterInfo.Name, -1)
+	datanodeDeadExpr = strings.Replace(datanodeDeadExpr, "{cluster_name}", clusterInfo.Name, -1)
+	namenodeTotalFileExpr = strings.Replace(namenodeTotalFileExpr, "{cluster_name}", clusterInfo.Name, -1)
+	err, datanodeLiveResponse := grafana.GrafanaQuery(datanodeLiveExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		log.Errorf("get data node live num error: %v", err)
+		result.DataNodeLiveNums = 0
+	}
+
+	for _, r := range datanodeLiveResponse.Data.Result {
+		values := r.Values
+		v, _ := values[0][1].(string)
+		result.DataNodeLiveNums, _ = strconv.Atoi(v)
+		break
+	}
+	err, datanodeDeadResponse := grafana.GrafanaQuery(datanodeDeadExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		log.Errorf("get data node dead num error: %v", err)
+		result.DataNodeDeadNums = 0
+	}
+
+	for _, r := range datanodeDeadResponse.Data.Result {
+		values := r.Values
+		v, _ := values[0][1].(string)
+		result.DataNodeDeadNums, _ = strconv.Atoi(v)
+		break
+	}
+	err, namenodeTotalFileResponse := grafana.GrafanaQuery(namenodeTotalFileExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		log.Errorf("get name node total file num error: %v", err)
+		result.HdfsFileNum = 0
+	}
+
+	for _, r := range namenodeTotalFileResponse.Data.Result {
+		values := r.Values
+		v, _ := values[0][1].(string)
+		result.HdfsFileNum, _ = strconv.Atoi(v)
+		break
+	}
+	result.NameNodeMem = namenodeMem
+	result.DataNodeMem = datanodeMem
+	return result
+}
+func GetAlertList(param map[string]string) (grafana.AlertRules, error) {
+	err, alerts := grafana.GrafanaAlertsSearch(param)
+	if err != nil {
+		return nil, err
+	}
+	return alerts, nil
+}
+
+type InspectNodeStates struct {
+	NodeTotal              int `json:"total"`
+	AgentErrorNum          int `json:"agent_error_num"`
+	AlertingNum            int `json:"alerting_num"`
+	ServiceRunErrorNum     int `json:"service_run_err_num"`
+	ServiceHostDownNum     int `json:"service_host_down_num"`
+	ServiceHealthyErrorNum int `json:"service_healthy_error_num"`
+	ServiceAlertingNum     int `json:"service_alerting_num"`
+	HasNameNode            int `json:"has_name_node"`
+	MysqlSlaveStatus       int `json:"mysql_slave_status"`
+}
+
+func GetPlatformInspectBaseInfoByClusterId(id int, alerts, hostAlerts grafana.AlertRules) (InspectNodeStates, error) {
+	var result InspectNodeStates
+	clusterInfo, err := model.DeployClusterList.GetClusterInfoById(id)
+	if err != nil {
+		return result, fmt.Errorf("[GetPlatformInspectBaseInfoByClusterId]Get cluster info by cluster_id error: %v ", err)
+	}
+
+	hostsInfo, err := model.DeployHostList.GetInspectNodeInfoByClusterId(id)
+	if err != nil {
+		return result, fmt.Errorf("[GetPlatformInspectBaseInfoByClusterId]Get host info by cluster_id error: %v ", err)
+	}
+	result.MysqlSlaveStatus = GetMysqlSalveStatusByGrafana(clusterInfo.Name)
+	unRunningNum, unHealthyNum, err := model.DeployInstanceList.GetInspectServiceInfoById(id)
+	if err != nil {
+		return result, fmt.Errorf("[GetPlatformInspectBaseInfoByClusterId]Get service info by cluster_id error: %v ", err)
+	}
+	result.ServiceRunErrorNum, result.ServiceHealthyErrorNum = unRunningNum, unHealthyNum
+	result.NodeTotal = len(hostsInfo)
+	hostAlerting := make(map[string]bool, 0)
+	hostService := make(map[string][]string, 0)
+	hostDownService := make(map[string]bool, 0)
+	for _, host := range hostsInfo {
+
+		serviceList := strings.Split(host.ServiceList, ",")
+		hostService[host.Ip] = serviceList
+		hostAlerting[host.Ip] = false
+		if result.HasNameNode != 1 && strings.Index(host.ServiceList, "hdfs_namenode") != -1 {
+			result.HasNameNode = 1
+		}
+		if host.IsRunning == false {
+			result.AgentErrorNum = result.AgentErrorNum + 1
+			for _, v := range serviceList {
+				if _, ok := hostDownService[v]; !ok {
+					hostDownService[v] = true
+					result.ServiceHostDownNum++
+				}
+			}
+		}
+	}
+
+	for _, alert := range hostAlerts {
+		if alert.State != "ok" && alert.State != "paused" && alert.State != "pending" {
+			for _, match := range alert.EvalData.EvalMatches {
+				if instance, ok := match.Tags["instance"]; ok {
+					ip := strings.Split(instance, ":")[0]
+					if _, oks := hostAlerting[ip]; oks && hostAlerting[ip] == false {
+						hostAlerting[ip] = true
+						result.AlertingNum++
+					}
+				}
+			}
+		}
+	}
+
+	evalMatches := make([]grafana.EvalMatches, 0)
+	for _, alert := range alerts {
+		if alert.State != "ok" && alert.State != "paused" && alert.State != "pending" {
+			for _, match := range alert.EvalData.EvalMatches {
+				if name, ok := match.Tags["cluster_name"]; ok && name == clusterInfo.Name {
+					evalMatches = append(evalMatches, match)
+				}
+			}
+		}
+	}
+	serviceAlerting := make(map[string]bool, 0)
+	for _, eval := range evalMatches {
+		if instance, ok := eval.Tags["instance"]; ok {
+			if _, okp := eval.Tags["product_name"]; !okp {
+				continue
+			}
+			if _, okp := eval.Tags["service_name"]; !okp {
+				continue
+			}
+			ip := strings.Split(instance, ":")[0]
+			serviceStr := eval.Tags["product_name"] + "-" + eval.Tags["service_name"]
+			for _, sv := range hostService[ip] {
+				if sv == serviceStr {
+					if _, sok := serviceAlerting[sv]; !sok {
+						serviceAlerting[sv] = true
+						result.ServiceAlertingNum++
+					}
+				}
+			}
+		}
+	}
+	return result, err
+}
+
+func GetMysqlSalveStatusByGrafana(clusterName string) int {
+	ioExpr := MYSQL_IO_RUNNING
+	sqlExpr := MYSQL_SQL_RUNNING
+	ioExpr = strings.Replace(ioExpr, "{cluster_name}", clusterName, -1)
+	sqlExpr = strings.Replace(sqlExpr, "{cluster_name}", clusterName, -1)
+	err, ioResponse := grafana.GrafanaQuery(ioExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		return 0
+	}
+	err, sqlResponse := grafana.GrafanaQuery(sqlExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		return 0
+	}
+	resList := append(ioResponse.Data.Result, sqlResponse.Data.Result...)
+	for _, result := range resList {
+		values := result.Values
+		for _, value := range values {
+			v, _ := value[1].(string)
+			if v == "0" {
+				return 0
+			}
+		}
+	}
+
+	return 1
+}
+
+// GetPlatformGraphConfig 	godoc
+// @Summary      	获取图表配置列表
+// @Description  	获取图表配置列表
+// @Tags         	Inspect
+// @Produce      	json
+// @Param			cluster_id query int true "Cluster ID"
+// @Success      	200		{object} 	[]model.BaseTemplateConfig
+// @Router       	/api/v2/platform/inspect/graph/config [get]
+func GetPlatformGraphConfig(ctx context.Context) apibase.Result {
+	paramsErr := apibase.NewApiParameterErrors()
+	clusterId, err := ctx.URLParamInt("cluster_id")
+	if err != nil {
+		paramsErr.AppendError("$", fmt.Errorf("param cluster_id is empty"))
+	}
+	clusterInfo, err := model.DeployClusterList.GetClusterInfoById(clusterId)
+	if err != nil {
+		return fmt.Errorf("[GetPlatformGraphConfig]Get cluster info by cluster_id error: %v ", err)
+	}
+	name := clusterInfo.Name
+	configList, err := model.InspectReportTemplate.GetPlatformTemplateConfig()
+	if err != nil {
+		log.Errorf("[GetPlatformGraphConfig] get config file %v ", err)
+	}
+	notHadoopServiceList, err := model.DeployInstanceList.GetServerListNotHadoopById(clusterId)
+	if err != nil {
+		return fmt.Errorf("[GetPlatformGraphConfig]Query application service list by cluster_id error: %v ", err)
+	}
+	serviceList := make([]model.InspectServiceList, 0)
+	for _, v := range notHadoopServiceList {
+		if !strings.Contains(strings.ToLower(v.ServiceName), "sql") &&
+			!strings.Contains(strings.ToLower(v.ServiceName), "front") &&
+			!strings.Contains(strings.ToLower(v.ServiceName), "kafka") &&
+			!strings.Contains(strings.ToLower(v.ServiceName), "zookeeper") {
+			serviceList = append(serviceList, v)
+		}
+	}
+
+	for k, v := range configList {
+		if v.Type == 2 && v.Metric == "Full GC Count (2minutes)" {
+			configList = append(configList[0:k], configList[k+1:]...)
+			for _, sv := range serviceList {
+				temp := v
+				temp.Module = sv.ServiceName
+				temp.Targets = strings.Replace(temp.Targets, "{ProductName}", sv.ProductName, -1)
+				temp.Targets = strings.Replace(temp.Targets, "{ServiceName}", sv.ServiceName, -1)
+				configList = append(configList, temp)
+			}
+		}
+
+	}
+
+	sort.Slice(configList, func(i, j int) bool {
+		if configList[i].Type == configList[j].Type {
+			return strings.ToLower(configList[i].Module) < strings.ToLower(configList[j].Module)
+		}
+		return configList[i].Type < configList[j].Type
+	})
+	for k, v := range configList {
+		configList[k].Targets = strings.Replace(v.Targets, "{cluster_name}", name, -1)
+	}
+	return configList
+}
+
+type FromStruct struct {
+	FormHead  []string   `json:"form_head"`
+	FormValue [][]string `json:"form_value"`
+}
+
+// GetPlatformInspectFormData 	godoc
+// @Summary      	获取巡检报告表格信息
+// @Description  	获取巡检报告表格信息
+// @Tags         	Inspect
+// @Produce      	json
+// @Param			cluster_id query int 	true 	"Cluster ID"
+// @Param			form_title query string true 	"form_title"
+// @Success      	200		{object} 	FromStruct
+// @Router       	/api/v2/platform/inspect/form/data [get]
+func GetPlatformInspectFormData(ctx context.Context) apibase.Result {
+
+	var result FromStruct
+	inspectConfig := cache.SysConfig.InspectConfig
+	paramsErr := apibase.NewApiParameterErrors()
+	clusterId, err := ctx.URLParamInt("cluster_id")
+	if err != nil {
+		paramsErr.AppendError("$", fmt.Errorf("param cluster_id is empty"))
+	}
+	clusterInfo, err := model.DeployClusterList.GetClusterInfoById(clusterId)
+	if err != nil {
+		return fmt.Errorf("[GetPlatformInspectFormData]Get cluster info by cluster_id error: %v ", err)
+	}
+
+	formTitle := ctx.URLParam("form_title")
+	if formTitle == "" {
+		paramsErr.AppendError("$", fmt.Errorf("param form_title is empty"))
+	}
+	switch formTitle {
+	case SERVICE_GC_FORM_TITLE:
+		gcHead := "GC次数（近{time}分钟大于等于{freq}次）"
+		gcHead = strings.Replace(gcHead, "{time}", strconv.Itoa(inspectConfig.FullGCTime), 1)
+		gcHead = strings.Replace(gcHead, "{freq}", strconv.Itoa(inspectConfig.FullGCFreq), 1)
+		result.FormHead = []string{"服务", "所在节点", gcHead}
+		result.FormValue = GetServiceGCFormValue(clusterInfo.Name, inspectConfig.FullGCTime, inspectConfig.FullGCFreq)
+	case DIR_USAGE_FORM_TITLE:
+		gcHead := "目录使用（大于等于{mem}G）"
+		gcHead = strings.Replace(gcHead, "{mem}", strconv.Itoa(inspectConfig.DirSize), 1)
+		result.FormHead = []string{"节点", gcHead}
+		result.FormValue = GetDirUsageFormValue(clusterId, inspectConfig.DirSize)
+	case ALARM_FROM_TITLE:
+		result.FormHead = []string{"告警指标", "指标归属", "所在节点", "首次告警时间"}
+		result.FormValue = GetAlertIndicatorsList(clusterId)
+	case HDFS_FILE_USAGE_FORM_TITLE:
+		result.FormHead = []string{"节点", "文件存储使用率"}
+		result.FormValue = GetFileUsageFormValue(clusterInfo.Name)
+	case CPU_USAGE_FROM_TITLE:
+		gcHead := "CPU使用率（大于等于{cpu}%）"
+		gcHead = strings.Replace(gcHead, "{cpu}", strconv.Itoa(inspectConfig.NodeCPUUsage), 1)
+		result.FormHead = []string{"节点", gcHead}
+		result.FormValue = GetCPUORMemUsageFormValue(clusterInfo.Name, inspectConfig.NodeCPUUsage, CPU_USAGE_FROM_TITLE)
+	case MEM_USAGE_FROM_TITLE:
+		gcHead := "内存使用率（大于等于{mem}%）"
+		gcHead = strings.Replace(gcHead, "{mem}", strconv.Itoa(inspectConfig.NodeMEMUsage), 1)
+		result.FormHead = []string{"节点", gcHead}
+		result.FormValue = GetCPUORMemUsageFormValue(clusterInfo.Name, inspectConfig.NodeMEMUsage, MEM_USAGE_FROM_TITLE)
+	case DISK_USAGE_FROM_TITLE:
+		gcHead := "磁盘使用率（大于等于{disk}%）"
+		gcHead = strings.Replace(gcHead, "{disk}", strconv.Itoa(inspectConfig.NodeDiskUsage), 1)
+		result.FormHead = []string{"节点", gcHead}
+		result.FormValue = GetCPUORMemUsageFormValue(clusterInfo.Name, inspectConfig.NodeDiskUsage, DISK_USAGE_FROM_TITLE)
+	case INODE_USAGE_FROM_TITLE:
+		gcHead := "inode使用率（大于等于{inode}%）"
+		gcHead = strings.Replace(gcHead, "{inode}", strconv.Itoa(inspectConfig.NodeInodeUsage), 1)
+		result.FormHead = []string{"节点", gcHead}
+		result.FormValue = GetCPUORMemUsageFormValue(clusterInfo.Name, inspectConfig.NodeInodeUsage, INODE_USAGE_FROM_TITLE)
+	case SWAP_USAGE_FROM_TITLE:
+		result.FormHead = []string{"节点", "swap使用量"}
+		result.FormValue = GetSwapUsageFormValue(clusterId)
+
+	}
+	return result
+}
+func GetServiceGCFormValue(name string, gctime, freq int) [][]string {
+	serviceGC := make([][]string, 0)
+	gcExpr := SERVICE_GC
+	gcExpr = strings.Replace(gcExpr, "{cluster_name}", name, -1)
+	gcExpr = strings.Replace(gcExpr, "{time}", strconv.Itoa(gctime), 1)
+	gcExpr = strings.Replace(gcExpr, "{freq}", strconv.Itoa(freq), 1)
+	gcExpr = strings.Replace(gcExpr, "{gc_type}", "G1 Old Generation", 1)
+	err, gcResponse := grafana.GrafanaQuery(gcExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		log.Errorf("[GetServiceGCFormValue] get G1 Old Generation GC err :%v", err)
+		return serviceGC
+	}
+	resList := gcResponse.Data.Result
+	gcExpr = strings.Replace(gcExpr, "G1 Old Generation", "PS MarkSweep", 1)
+	err, gcResponse = grafana.GrafanaQuery(gcExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		log.Errorf("[GetServiceGCFormValue] get PS MarkSweep GC err :%v", err)
+		return serviceGC
+	}
+	resList = append(resList, gcResponse.Data.Result...)
+	resultMap := make(map[string]int, 0)
+	for _, v := range resList {
+		ip, sv := "", ""
+		if instance, ok := v.Metric["instance"]; ok {
+			ip = strings.Split(instance.(string), ":")[0]
+			if service, sok := v.Metric["service_name"]; sok {
+				sv = service.(string)
+			}
+		}
+		numStr, _ := v.Values[0][1].(string)
+		num, _ := strconv.Atoi(numStr)
+		resultMap[ip+"-"+sv] += num
+
+	}
+	type ServiceGC struct {
+		IP      string `json:"ip"`
+		Service string `json:"service"`
+		Num     int    `json:"num"`
+	}
+	var resultSlice []ServiceGC
+	for k, v := range resultMap {
+		service, ip := strings.Split(k, "-")[1], strings.Split(k, "-")[0]
+		resultSlice = append(resultSlice, ServiceGC{Service: service, IP: ip, Num: v})
+	}
+	sort.Slice(resultSlice, func(i, j int) bool {
+		return resultSlice[i].Num > resultSlice[j].Num
+	})
+	for _, v := range resultSlice {
+		serviceGC = append(serviceGC, []string{v.Service, v.IP, strconv.Itoa(v.Num)})
+	}
+	return serviceGC
+}
+
+func GetDirUsageFormValue(id int, config int) [][]string {
+	formValue := make([][]string, 0)
+	duCMD := "#!/bin/sh\n du -sm /opt/dtstack"
+	hostList, err := model.DeployClusterHostRel.GetInspectClusterHostRelList(id)
+	if err != nil {
+		log.Errorf("[GetDirUsageFormValue] get host list err:%v", err)
+		return formValue
+	}
+
+	for k, v := range hostList {
+		content, err := agent.AgentClient.ToExecCmdWithTimeout(v.Sid, "", duCMD, "15s", "", "")
+		if err != nil {
+			log.Errorf("[GetDirUsageFormValue] exec cmd err:%v", err)
+			return formValue
+		}
+		sizeStr := strings.Replace(content, "\t/opt/dtstack\n", "", -1)
+		size, _ := strconv.ParseFloat(sizeStr, 64)
+		hostList[k].DirSize = size
+	}
+	sort.Slice(hostList, func(i, j int) bool {
+		return hostList[i].DirSize > hostList[j].DirSize
+	})
+	for _, v := range hostList {
+		if v.DirSize/1024 < float64(config) {
+			break
+		}
+		size := strconv.FormatFloat(v.DirSize/1024, 'f', 2, 64)
+		size = size + "G"
+		formValue = append(formValue, []string{v.IP, size})
+	}
+	return formValue
+}
+
+func GetAlertIndicatorsList(id int) [][]string {
+	formValue := make([][]string, 0)
+	alertParam := make(map[string]string, 0)
+	hostList, err := model.DeployClusterHostRel.GetInspectClusterHostRelList(id)
+	if err != nil {
+		log.Errorf("[GetAlertIndexList]get host list error: %v", err)
+		return formValue
+	}
+	IPMap := make(map[string]bool, 0)
+	for _, v := range hostList {
+		IPMap[v.IP] = true
+	}
+	err, dashboardResp := grafana.GetDashboardByUid("Ne_roaViz")
+	if err != nil {
+		log.Errorf("[GetAlertIndexList]get host overview dashboard error: %v", err)
+		return formValue
+	}
+	allAlerts, err := GetAlertList(alertParam)
+
+	alertParam = map[string]string{
+		"dashboardId": strconv.Itoa(dashboardResp.Dashboard.Id),
+	}
+	hostAlerts, err := GetAlertList(alertParam)
+	for _, alert := range hostAlerts {
+		if alert.State != "ok" && alert.State != "paused" && alert.State != "pending" {
+			timeStr, _ := time.Parse(time.RFC3339, alert.NewStateDate)
+			for _, match := range alert.EvalData.EvalMatches {
+				if instance, ok := match.Tags["instance"]; ok {
+					ip := strings.Split(instance, ":")[0]
+					if IPMap[ip] {
+						formValue = append(formValue, []string{alert.Name, "节点", ip, timeStr.Format(base.TsLayout)})
+					}
+
+				}
+			}
+			if len(alert.EvalData.EvalMatches) == 0 {
+				formValue = append(formValue, []string{alert.Name, "节点", "-", timeStr.Format(base.TsLayout)})
+			}
+		}
+	}
+	for _, alert := range allAlerts {
+
+		if alert.State != "ok" && alert.State != "paused" && alert.State != "pending" && alert.DashboardUid != "Ne_roaViz" {
+			timeStr, _ := time.Parse(time.RFC3339, alert.NewStateDate)
+			for _, match := range alert.EvalData.EvalMatches {
+				serviceName := ""
+				if _, okp := match.Tags["service_name"]; !okp {
+					serviceName = "-"
+				} else {
+					serviceName = match.Tags["service_name"]
+				}
+				if instance, ok := match.Tags["instance"]; ok {
+					ip := strings.Split(instance, ":")[0]
+					if IPMap[ip] {
+						formValue = append(formValue, []string{alert.Name, serviceName, ip, timeStr.Format(base.TsLayout)})
+					}
+				}
+			}
+
+		}
+	}
+	return formValue
+}
+
+type InspectNodeUsage struct {
+	IP    string
+	Usage float64
+}
+
+func GetFileUsageFormValue(name string) [][]string {
+	formValue := make([][]string, 0)
+	fileUsageExpr := FILE_USAGE
+	fileUsageExpr = strings.Replace(fileUsageExpr, "{cluster_name}", name, -1)
+	err, fileResponse := grafana.GrafanaQuery(fileUsageExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		log.Errorf("[GetFileUsageFormValue] get node file usage err :%v", err)
+		return formValue
+	}
+	resList := fileResponse.Data.Result
+	result := make([]InspectNodeUsage, 0)
+	for _, v := range resList {
+		ip := ""
+		if instance, ok := v.Metric["instance"]; ok {
+			ip = strings.Split(instance.(string), ":")[0]
+			numStr, _ := v.Values[0][1].(string)
+			usage, _ := strconv.ParseFloat(numStr, 64)
+			result = append(result, InspectNodeUsage{IP: ip, Usage: usage})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Usage > result[j].Usage
+	})
+	for _, v := range result {
+		usageStr := strconv.FormatFloat(v.Usage, 'f', 2, 64) + "%"
+		formValue = append(formValue, []string{v.IP, usageStr})
+	}
+	return formValue
+}
+
+func GetCPUORMemUsageFormValue(name string, config int, formTitle string) [][]string {
+	formValue := make([][]string, 0)
+	UsageExpr := CPU_USAGE
+	switch formTitle {
+	case INODE_USAGE_FROM_TITLE:
+		UsageExpr = INODE_USAGE
+	case DISK_USAGE_FROM_TITLE:
+		UsageExpr = DISK_USAGE
+	case MEM_USAGE_FROM_TITLE:
+		UsageExpr = MEM_USAGE
+	}
+
+	UsageExpr = strings.Replace(UsageExpr, "{cluster_name}", name, -1)
+	UsageExpr = strings.Replace(UsageExpr, "{config}", strconv.Itoa(config), 1)
+	err, Response := grafana.GrafanaQuery(UsageExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		log.Errorf("[GetCPUORMemUsageFormValue] get node cpu usage err :%v", err)
+		return formValue
+	}
+	result := make([]InspectNodeUsage, 0)
+	resList := Response.Data.Result
+	for _, v := range resList {
+		ip := ""
+		if instance, ok := v.Metric["instance"]; ok {
+			ip = strings.Split(instance.(string), ":")[0]
+			numStr, _ := v.Values[0][1].(string)
+			usage, _ := strconv.ParseFloat(numStr, 64)
+			result = append(result, InspectNodeUsage{IP: ip, Usage: usage})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Usage > result[j].Usage
+	})
+	for _, v := range result {
+		usageStr := strconv.FormatFloat(v.Usage, 'f', 2, 64) + "%"
+		formValue = append(formValue, []string{v.IP, usageStr})
+	}
+	return formValue
+}
+
+func GetSwapUsageFormValue(id int) [][]string {
+	formValue := make([][]string, 0)
+	UsageExpr := SWAP_USAGE
+	//((sum by(instance)(node_memory_SwapTotal))-(sum by(instance)(node_memory_SwapFree))-(sum by(instance)(node_memory_SwapCached)) )/(8*1024*1024*1024)
+	hostList, err := model.DeployClusterHostRel.GetInspectClusterHostRelList(id)
+	IPMap := make(map[string]bool, 0)
+	for _, v := range hostList {
+		IPMap[v.IP] = true
+	}
+
+	err, Response := grafana.GrafanaQuery(UsageExpr, int(time.Now().Unix()), int(time.Now().Unix()), 1)
+	if err != nil {
+		log.Errorf("[GetSwapUsageFormValue] get node cpu usage err :%v", err)
+		return formValue
+	}
+	result := make([]InspectNodeUsage, 0)
+	resList := Response.Data.Result
+	for _, v := range resList {
+		ip := ""
+		if instance, ok := v.Metric["instance"]; ok {
+			ip = strings.Split(instance.(string), ":")[0]
+			if IPMap[ip] {
+				numStr, _ := v.Values[0][1].(string)
+				usage, _ := strconv.ParseFloat(numStr, 64)
+				result = append(result, InspectNodeUsage{IP: ip, Usage: usage})
+			}
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Usage > result[j].Usage
+	})
+	for _, v := range result {
+		usageStr := strconv.FormatFloat(v.Usage, 'f', 4, 64) + "G"
+		formValue = append(formValue, []string{v.IP, usageStr})
+	}
+	return formValue
 }

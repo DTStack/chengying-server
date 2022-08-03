@@ -18,14 +18,19 @@
 package impl
 
 import (
+	"bytes"
 	sysContext "context"
 	"database/sql"
+	"dtstack.com/dtstack/easymatrix/matrix/model/upgrade"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -73,6 +78,71 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+const (
+	IMAGE_DIR    = "dtstack-runtime/images"
+	IMAGE_SUFFIX = ".tar"
+)
+
+func PushOperatorImage(registry string) {
+	//推送operator相关的镜像
+	log.Infof("prepare push images to registry %v", registry)
+	ImageDir := filepath.Join(base.WebRoot, IMAGE_DIR)
+	err := filepath.Walk(ImageDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if ImageDir == path {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		if !strings.HasSuffix(path, IMAGE_SUFFIX) {
+			log.Infof("not found image file in: %v", ImageDir)
+			return nil
+		}
+
+		log.Infof("find image file: %v", path)
+		log.Infof("docker load images file %v", path)
+		LoadImage := fmt.Sprintf("docker load -i %s | grep 'Loaded image'|awk '{print $3}'", path)
+		log.Debugf("exec docker load command: %v", LoadImage)
+		cmd := exec.Command("/bin/sh", "-c", LoadImage)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		if err := cmd.Run(); err != nil {
+			log.Errorf("docker load image %v error: %v", path, err)
+			return err
+		}
+		//获取镜像原始标签同时去除换行符
+		sourceTag := strings.Replace(out.String(), "\n", "", -1)
+		newTag := registry + "/" + sourceTag
+		log.Infof("docker load images %v file success, source tag is: %v", path, sourceTag)
+
+		//镜像打标签
+		err = docker.Tag(newTag, sourceTag)
+		if err != nil {
+			log.Errorf("docker tag error:", err)
+			return err
+		}
+		log.Infof("tag image %v success", newTag)
+		//推送镜像
+		push := exec.Command("docker", "push", newTag)
+		if err := push.Run(); err != nil {
+			log.Errorf("push image %v error", err)
+			return err
+		}
+		log.Infof("push image %v success", path)
+
+		return nil
+	})
+
+	if err != nil {
+		log.Errorf("push image error:", err.Error())
+		return
+	}
+}
+
 // k8s-镜像仓库crud
 func CreateImageStore(ctx context.Context) apibase.Result {
 	log.Debugf("[Cluster->CreateImageStore] CreateImageStore from EasyMatrix API ")
@@ -92,6 +162,7 @@ func CreateImageStore(ctx context.Context) apibase.Result {
 	if err != nil {
 		return fmt.Errorf("Database err: %v", err)
 	}
+	go PushOperatorImage(param.Address)
 	return map[string]interface{}{
 		"id":        id,
 		"clusterId": param.ClusterId,
@@ -699,37 +770,33 @@ func getProductInfoSeq(pidList []string, pInfoMap map[string]productDeployInfo, 
 	return resProdSeq, nil
 }
 
+type HostInfo struct {
+	MemSize   int64          `db:"mem_size"`
+	MemUsage  int64          `db:"mem_usage"`
+	DiskUsage sql.NullString `db:"disk_usage"`
+	CpuCores  int            `db:"cpu_cores"`
+	CpuUsage  float64        `db:"cpu_usage"`
+	Load1     float64        `db:"load1"`
+	Status    int            `db:"status"`
+	LocalIp   string         `db:"local_ip"`
+	Id        int            `db:"id"`
+	Updated   base.Time      `db:"updated"`
+}
+
 // AutoOrchestration 主机自动编排
-/**
-编排算法
-假设 A B C D E F 6 个产品包
-其依赖关系为
-
-C->B   C->A
-D->E   D->B
-F->C   F->A
-
-核心思想：将遍历的顺序中每个产品包的位置 替换为要部署该产品包需要部署的所有依赖加上自身  然后去重即可
-算法流程如下
-1. 初始化结果数组
-2. 遍历选择一个产品包 D 递归解析D的依赖关系直到根产品包(不依赖别的产品包)  每次递归将产品包放到队列的前面 得到当前顺序为   E D
-3. 对每个产品包执行 1 2 步骤 得到的每个产品包的结果追加数组结尾 假设 遍历顺序为    D  E C B A F  那么得到的数组为(忽略括号)      (E D) (E)  (B A C) (B) (A) (C  A F)
-4. 对结果数组进行去重  第二次出现的产品包移除  那么得到的最终依赖顺序为  E D B A C F
-getProdSeq  getSvcSeq 都采用此思想
-*/
 func AutoOrchestration(ctx context.Context) apibase.Result {
 	log.Debugf("AutoOrchestration: %v", ctx.Request().RequestURI)
 	var reqParams struct {
-		ClusterId   int           `json:"cluster_id"`
-		ProductInfo []productInfo `json:"product_info"`
+		ClusterId          int           `json:"cluster_id"`
+		ProductLineName    string        `json:"product_line_name"`
+		ProductLineVersion string        `json:"product_line_version"`
+		ProductInfo        []productInfo `json:"product_info"`
 	}
 	err := ctx.ReadJSON(&reqParams)
 	if err != nil {
 		log.Errorf("%v", err)
 		return err
 	}
-	log.Debugf("开始解析服务的依赖顺序")
-	//1. 解析服务的依赖顺序  先解析产品包 再解析 服务级别  产品包级别找不到直接报错
 
 	pInfoMap := map[string]productDeployInfo{}
 	var newPidList []string
@@ -747,11 +814,6 @@ func AutoOrchestration(ctx context.Context) apibase.Result {
 		}
 		newPidList = append(newPidList, strconv.Itoa(product.Id))
 		for _, name := range product.ServiceList {
-			//未设置 节点亲和性的产品包 不可以使用自动编排
-			if sc.Service[name].BaseProduct == "" && sc.Service[name].Orchestration == nil {
-				return fmt.Errorf("产品包：%s 服务：%s schema中未设置亲和性，无法使用自动编排", product.Name, name)
-			}
-
 			svcDeployInfos = append(svcDeployInfos, svcDeployInfo{
 				Name:    name,
 				SidList: nil,
@@ -765,12 +827,36 @@ func AutoOrchestration(ctx context.Context) apibase.Result {
 			Schema:             sc,
 		}
 	}
-	//解析产品包部署顺序以及其服务编排先后顺序
-	resProdSeq, err := getProductInfoSeq(newPidList, pInfoMap, reqParams.ProductInfo)
-	if err != nil {
+	//1.根据产品线解析产品包部署顺序
+	productLineInfo, err := model.DeployProductLineList.GetProductLineListByNameAndVersion(reqParams.ProductLineName, reqParams.ProductLineVersion)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Errorf("[Cluster->AutoOrchestration] get product line err: %v", err)
 		return err
 	}
-	log.Debugf("resProdSeq: %+v", resProdSeq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("产品线 `%v(%v)` 不存在", reqParams.ProductLineName, reqParams.ProductLineVersion)
+	}
+	var resProdSeq []productDeployInfo
+	deploySerial, err := GetProductLineDeploySerial(*productLineInfo)
+	if err != nil {
+		log.Errorf("[Cluster->AutoOrchestration] GetProductLineDeploySerial error: %v", err)
+		return err
+	}
+	temp := map[string]struct{}{}
+	for _, pInfo := range deploySerial {
+		if _, ok := temp[pInfo.ProductName]; !ok {
+			temp[pInfo.ProductName] = struct{}{}
+			if _, ok := pInfoMap[pInfo.ProductName]; ok {
+				resProdSeq = append(resProdSeq, productDeployInfo{
+					Pid:                pInfoMap[pInfo.ProductName].Pid,
+					Name:               pInfoMap[pInfo.ProductName].Name,
+					UncheckServiceList: pInfoMap[pInfo.ProductName].UncheckServiceList,
+					ServiceSeq:         pInfoMap[pInfo.ProductName].ServiceSeq,
+					Schema:             pInfoMap[pInfo.ProductName].Schema,
+				})
+			}
+		}
+	}
 
 	//以最后一次编排选择的为准 如果是第一次自动部署就插入
 	err = model.ProductSelectHistory.SetPidListStrByClusterId(strings.Join(newPidList, ","), reqParams.ClusterId)
@@ -779,9 +865,9 @@ func AutoOrchestration(ctx context.Context) apibase.Result {
 	}
 
 	hosts, err := model.DeployHostList.GetHostListByClusterId(reqParams.ClusterId)
-	var sidList []string
+	var ipList []string
 	for _, info := range hosts {
-		sidList = append(sidList, info.SidecarId)
+		ipList = append(ipList, info.Ip)
 	}
 	if err != nil {
 		return err
@@ -808,25 +894,32 @@ func AutoOrchestration(ctx context.Context) apibase.Result {
 					return err
 				}
 				roleName := idRoleMap[roleId].RoleName
-				roleHostMap[roleName] = append(roleHostMap[roleName], info.SidecarId)
+				roleHostMap[roleName] = append(roleHostMap[roleName], info.Ip)
 			}
 		}
 	}
 
-	count, err := model.DeployServiceIpList.CountServiceIpByClusterId(reqParams.ClusterId)
+	//获取服务之间的冲突和依赖关系
+	err, svcRelations := model.DeployServiceRelationsList.GetServiceRelationsList()
 	if err != nil {
 		return err
 	}
-	if count != 0 {
-		log.Debugf("该集群存在老的编排记录，不再编排")
-		goto res
+
+	//获取cpu、mem、disk等数据
+	hostInfoList, err := model.DeployHostList.GetHostRunningInfoListByClusterId(reqParams.ClusterId)
+	if err != nil {
+		return err
+	}
+	hostInfoMap := make(map[string]model.HostRunningInfo, 0)
+	for _, hostInfo := range hostInfoList {
+		hostInfoMap[hostInfo.LocalIp] = hostInfo
 	}
 
 	log.Debugf("按照服务顺序主机打角色")
 	//2. 按照服务顺序主机打角色
 	//产品包  服务  主机  角色
-	for prodIdx, info := range resProdSeq {
-		for svcIdx, svc := range info.ServiceSeq {
+	for _, info := range resProdSeq {
+		for _, svc := range info.ServiceSeq {
 			var maxReplica int
 			//role   tag   ip
 			//如果 maxReplica 未设置 则默认为 0
@@ -838,33 +931,32 @@ func AutoOrchestration(ctx context.Context) apibase.Result {
 					return err
 				}
 			}
-			//最后参数 sidelist 为该集群下所有可用的host列表
-			hostList, err := selectHostByRoleAndMaxReplica(pInfoMap[info.Name].Schema.Service[svc.Name].Orchestration, roleHostMap, maxReplica, sidList, info.Name, svc.Name)
+			oldIpList, err := model.DeployServiceIpList.GetServiceIpList(reqParams.ClusterId, info.Name, svc.Name)
 			if err != nil {
+				log.Errorf("get service ip list error:%v", err)
 				return err
 			}
-			resProdSeq[prodIdx].ServiceSeq[svcIdx].SidList = hostList
-			//部署A 服务的机器自动加上 A 角色
-			roleHostMap[svc.Name] = hostList
+			//没有编排记录，则进行编排。有编排记录，则无需再次进行编排
+			if len(oldIpList) == 0 {
+				hostList, err := selectHostByRoleAndMaxReplica(pInfoMap[info.Name].Schema.Service[svc.Name].Orchestration, roleHostMap, maxReplica, reqParams.ClusterId, ipList, info.Name, svc.Name, svcRelations, hostInfoMap)
+				if err != nil {
+					log.Errorf("%v", err)
+					continue
+				}
+
+				//resProdSeq[prodIdx].ServiceSeq[svcIdx].SidList = hostList
+				//部署A 服务的机器自动加上 A 角色
+				roleHostMap[svc.Name] = hostList
+
+				//3. 编排结果入库
+				err = setIp(info.Name, svc.Name, strings.Join(hostList, ","), reqParams.ClusterId)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 
-	log.Debugf("编排结果 %v", roleHostMap)
-	log.Debugf("编排结果开始入库")
-	//3. 编排结果入库
-	for _, info := range resProdSeq {
-		for _, svc := range info.ServiceSeq {
-			ipList, err := sidList2IpList(svc.SidList)
-			if err != nil {
-				return err
-			}
-			err = setIp(info.Name, svc.Name, strings.Join(ipList, ","), reqParams.ClusterId)
-			if err != nil {
-				return err
-			}
-		}
-	}
-res:
 	//4. 返回编排结果
 	type respStruct struct {
 		ProductName string                                     `json:"productName"`
@@ -885,9 +977,9 @@ res:
 	}
 
 	//按照首字母排序
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].ProductName < result[j].ProductName
-	})
+	//sort.Slice(result, func(i, j int) bool {
+	//	return result[i].ProductName < result[j].ProductName
+	//})
 
 	return result
 }
@@ -1119,7 +1211,158 @@ func WithIpRoleInfo(clusterId int, sc *schema.SchemaConfig) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
 
+//平滑升级模式，Select字段为将要执行平滑升级的主机列表，UnSelect字段为已部署了该服务的主机
+func SmoothUpgradeWithIpRoleInfo(clusterId int, productInfo *model.DeployProductListInfo, sc *schema.SchemaConfig) error {
+	//获取所有主机ip和角色信息
+	listByClusterId, err := model.DeployHostList.GetHostListByClusterId(clusterId)
+	if err != nil {
+		return err
+	}
+	IpRoleMap := make(map[string]schema.IpRole)
+	for _, hInfo := range listByClusterId {
+		if hInfo.RoleList.Valid && strings.TrimSpace(hInfo.RoleList.String) != "" {
+			roleNameList, err := model.HostRole.GetRoleNameListStrByIdList(hInfo.RoleList.String)
+			if err != nil {
+				return err
+			}
+			IpRoleMap[hInfo.Ip] = schema.IpRole{
+				IP:       hInfo.Ip,
+				RoleList: roleNameList,
+			}
+		} else {
+			IpRoleMap[hInfo.Ip] = schema.IpRole{
+				IP:       hInfo.Ip,
+				RoleList: nil,
+			}
+		}
+	}
+
+	//可平滑升级的服务
+	suMap := make(map[string]struct{})
+	suList, err := upgrade.SmoothUpgrade.GetByProductName(productInfo.ProductName)
+	if err != nil {
+		log.Errorf("query db error: %v", err)
+		return err
+	}
+	for _, svc := range suList {
+		suMap[svc.ServiceName] = struct{}{}
+	}
+
+	for name, svc := range sc.Service {
+		//每次都深拷贝 因为有 delete map操作
+		deepCopyIpRoleMap := make(map[string]schema.IpRole)
+		for k, v := range IpRoleMap {
+			deepCopyIpRoleMap[k] = v
+		}
+
+		var ipList string
+		query := "SELECT ip_list FROM " + model.DeployServiceIpList.TableName + " WHERE product_name=? AND service_name=? AND cluster_id=? AND namespace=?"
+		if err := model.USE_MYSQL_DB().Get(&ipList, query, sc.ProductName, name, clusterId, ""); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("query deployServiceIpList error: %s", err)
+		}
+		IpListMap := make(map[string]struct{})
+		for _, v := range strings.Split(ipList, ",") {
+			IpListMap[v] = struct{}{}
+		}
+
+		instanceList, count := model.DeployInstanceList.GetInstanceBelongService(productInfo.ProductName, name, clusterId)
+		if count != 0 {
+			//该产品包下的服务
+			var nIpList, suIpList []string
+			if svc.ServiceAddr == nil {
+				svc.ServiceAddr = &schema.ServiceAddrStruct{
+					Host:        nil,
+					IP:          nil,
+					NodeId:      0,
+					SingleIndex: 0,
+					Select:      nil,
+					UnSelect:    nil,
+				}
+				sc.Service[name] = svc
+			}
+			for _, instance := range instanceList {
+				//平滑升级的服务作特殊处理
+				if _, ok := suMap[instance.ServiceName]; ok {
+					//平滑升级的服务，根据编排信息返回Select和UnSelect
+					if _, ok := IpListMap[instance.Ip]; ok {
+						if _, ok := deepCopyIpRoleMap[instance.Ip]; ok {
+							sc.Service[name].ServiceAddr.Select = append(sc.Service[name].ServiceAddr.Select, deepCopyIpRoleMap[instance.Ip])
+						}
+					} else {
+						if _, ok := deepCopyIpRoleMap[instance.Ip]; ok {
+							sc.Service[name].ServiceAddr.UnSelect = append(sc.Service[name].ServiceAddr.UnSelect, deepCopyIpRoleMap[instance.Ip])
+						}
+					}
+					//已平滑升级的ip，放到ip列表中，给前端做编排限制
+					if instance.Pid == productInfo.ID {
+						suIpList = append(suIpList, instance.Ip)
+					}
+				} else {
+					//不可平滑升级的服务，全部放右边
+					if _, ok := deepCopyIpRoleMap[instance.Ip]; ok {
+						nIpList = append(nIpList, instance.Ip)
+						sc.Service[name].ServiceAddr.Select = append(sc.Service[name].ServiceAddr.Select, deepCopyIpRoleMap[instance.Ip])
+					}
+				}
+			}
+			if _, ok := suMap[name]; ok {
+				sc.Service[name].ServiceAddr.IP = suIpList
+			} else {
+				if err = model.DeployServiceIpList.SetServiceIp(productInfo.ProductName, name, strings.Join(nIpList, IP_LIST_SEP), clusterId, productInfo.Namespace); err != nil {
+					log.Errorf("SetServiceIp err: %v", err)
+					return err
+				}
+				sc.Service[name].ServiceAddr.IP = nIpList
+			}
+			//必须对 schema 中的列表进行排序
+			sort.Slice(sc.Service[name].ServiceAddr.Select, func(i, j int) bool {
+				return sc.Service[name].ServiceAddr.Select[i].IP < sc.Service[name].ServiceAddr.Select[j].IP
+			})
+			sort.Slice(sc.Service[name].ServiceAddr.UnSelect, func(i, j int) bool {
+				return sc.Service[name].ServiceAddr.UnSelect[i].IP < sc.Service[name].ServiceAddr.UnSelect[j].IP
+			})
+		} else {
+			//依赖服务，编排选中的ip
+			//无论有没有 ip，都要设置 role info  因为 select 与 unselect 自动部署需要回显
+			if sc.Service[name].ServiceAddr != nil {
+				err = SetAddrWithRoleInfo(name, sc, deepCopyIpRoleMap, ipList)
+				if err != nil {
+					return err
+				}
+			} else {
+				svc.ServiceAddr = &schema.ServiceAddrStruct{
+					Host:        nil,
+					IP:          nil,
+					NodeId:      0,
+					SingleIndex: 0,
+					Select:      nil,
+					UnSelect:    nil,
+				}
+				sc.Service[name] = svc
+				err = SetAddrWithRoleInfo(name, sc, deepCopyIpRoleMap, ipList)
+				if err != nil {
+					return err
+				}
+			}
+			//首次平滑升级，记录平滑升级前的mysql地址
+			if name == "mysql" && svc.ServiceAddr.IP != nil {
+				_, err := model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterId(sc.ProductName, clusterId)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					log.Errorf("%v", err)
+					return err
+				}
+				if errors.Is(err, sql.ErrNoRows) {
+					if err := model.DeployMysqlIpList.SetMysqlIp(productInfo.ProductName, strings.Join(svc.ServiceAddr.IP, IP_LIST_SEP), clusterId, productInfo.Namespace); err != nil {
+						log.Errorf("SetMysqlIp err: %v", err)
+						return err
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -1167,17 +1410,175 @@ func setIp(productName, serviceName, ip string, clusterId int) error {
 }
 
 //亲和性选择
-func affinitySelect(res *[]string, affinity []string, roleHostMap map[string][]string) {
-	//如果 schema 中没有填或者为空 那么亲和性选择结果为空
+func affinitySelect(res *[]string, affinity []string, roleHostMap map[string][]string, svcRelations []model.DeployServiceRelationsInfo, productName, svcName string, maxReplica, clusterId int, hostInfoMap map[string]model.HostRunningInfo) {
+	//如果 schema 中没有填或者为空，那么亲和性选择结果为空，不编排
 	if len(affinity) == 0 {
 		*res = (*res)[0:0]
 		return
 	}
 	if len(affinity) == 1 {
-		*res = util.IntersectionString(*res, roleHostMap[affinity[0]])
+		//1 预选
+		//1.1 筛选出符合条件的主机
+		matchNodeList := roleHostMap[affinity[0]]
+		matchNodeMap := map[string]struct{}{}
+		for _, node := range matchNodeList {
+			matchNodeMap[node] = struct{}{}
+		}
+		//1.2 移除冲突服务所编排的主机
+		conflictSelect(&matchNodeList, svcRelations, productName, svcName, clusterId, matchNodeMap)
+		//1.3 符合条件的主机数量 < maxReplica，不再进行后续匹配
+		if len(matchNodeList) < maxReplica {
+			*res = util.IntersectionString(*res, matchNodeList)
+			return
+		}
+		//1.4 根据依赖匹配主机
+		relyOnSelect(&matchNodeList, svcRelations, productName, svcName, clusterId, matchNodeMap)
+		//1.5 maxReplica = 0，匹配到的主机都安装，不再进行后续匹配; 符合条件的主机数量 < maxReplica，不再进行后续匹配
+		if maxReplica == 0 || len(matchNodeList) < maxReplica {
+			*res = util.IntersectionString(*res, matchNodeList)
+			return
+		}
+
+		hostInfoList := make([]model.HostRunningInfo, 0)
+		var load1Sum float64
+		for _, ip := range matchNodeList {
+			if _, ok := hostInfoMap[ip]; ok {
+				hostInfoList = append(hostInfoList, hostInfoMap[ip])
+				load1Sum += hostInfoMap[ip].Load1
+			}
+		}
+		if maxReplica < len(hostInfoList) {
+			rand.Seed(time.Now().UnixNano())
+			rand.Shuffle(len(hostInfoList), func(i int, j int) {
+				hostInfoList[i], hostInfoList[j] = hostInfoList[j], hostInfoList[i]
+			})
+		}
+		average := load1Sum / float64(len(matchNodeList))
+
+		//2.load1 <= average，优先分配
+		expected := make([]string, 0)
+		for _, v := range hostInfoList {
+			if len(expected) == maxReplica {
+				break
+			}
+			if v.Load1 <= average {
+				expected = append(expected, v.LocalIp)
+			}
+		}
+
+		//3.主机数量不足补齐
+		if dCount := maxReplica - len(expected); dCount > 0 {
+			//将找出的主机列表(差集)，进行随机排序
+			difference := util.DifferenceString(matchNodeList, expected)
+			if dCount < len(difference) {
+				rand.Seed(time.Now().UnixNano())
+				rand.Shuffle(len(difference), func(i int, j int) {
+					difference[i], difference[j] = difference[j], difference[i]
+				})
+			}
+			for index, value := range difference {
+				if index == dCount {
+					break
+				}
+				expected = append(expected, value)
+			}
+		}
+
+		*res = util.IntersectionString(*res, expected)
 		return
 	}
-	affinitySelect(res, affinity[1:], roleHostMap)
+	affinitySelect(res, affinity[1:], roleHostMap, svcRelations, productName, svcName, maxReplica, clusterId, hostInfoMap)
+}
+
+func conflictSelect(matchNodeList *[]string, svcRelations []model.DeployServiceRelationsInfo, productName, svcName string, clusterId int, matchNodeMap map[string]struct{}) {
+	if len(*matchNodeList) == 0 {
+		return
+	}
+	for _, relations := range svcRelations {
+		if relations.RelationsType == model.RELATIONS_TYPE_CONFLICT {
+			oldServiceIpList := make([]string, 0)
+			var err error
+			if relations.SourceProductName == productName && relations.SourceServiceName == svcName {
+				//查询目标冲突服务编排信息
+				oldServiceIpList, err = model.DeployServiceIpList.GetServiceIpList(clusterId, relations.TargetProductName, relations.TargetServiceName)
+			} else if relations.TargetProductName == productName && relations.TargetServiceName == svcName {
+				//查询来源冲突服务编排信息
+				oldServiceIpList, err = model.DeployServiceIpList.GetServiceIpList(clusterId, relations.SourceProductName, relations.SourceServiceName)
+			}
+			if err != nil {
+				log.Errorf("%v", err)
+				return
+			}
+			//冲突服务没有编排记录，主机列表不做处理
+			if len(oldServiceIpList) == 0 {
+				continue
+			}
+			//冲突服务有编排记录，移除冲突服务ip
+			conflictList := make([]string, 0)
+			for _, ip := range oldServiceIpList {
+				if _, ok := matchNodeMap[ip]; ok {
+					conflictList = append(conflictList, ip)
+				}
+			}
+			*matchNodeList = util.DifferenceString(*matchNodeList, conflictList)
+		}
+	}
+}
+
+func relyOnSelect(matchNodeList *[]string, svcRelations []model.DeployServiceRelationsInfo, productName, svcName string, clusterId int, matchNodeMap map[string]struct{}) {
+	if len(*matchNodeList) == 0 {
+		return
+	}
+	for _, relations := range svcRelations {
+		if relations.RelationsType == model.RELATIONS_TYPE_RELYON {
+			if relations.SourceProductName == productName && relations.SourceServiceName == svcName {
+				//本服务依赖目标服务，查询目标服务编排信息
+				oldServiceIpList, err := model.DeployServiceIpList.GetServiceIpList(clusterId, relations.TargetProductName, relations.TargetServiceName)
+				if err != nil {
+					log.Errorf("%v", err)
+					return
+				}
+				//目标服务服务没有编排记录，本服务不再编排
+				if len(oldServiceIpList) == 0 {
+					*matchNodeList = (*matchNodeList)[0:0]
+					return
+				}
+				//目标服务有编排记录，有主机角色不匹配，本服务不再编排; 主机角色全部匹配，按照亲和性编排,匹配上的主机数量 < maxReplica 后续处理
+				relyOnList := make([]string, 0)
+				for _, ip := range oldServiceIpList {
+					if _, ok := matchNodeMap[ip]; !ok {
+						*matchNodeList = (*matchNodeList)[0:0]
+						return
+					} else {
+						relyOnList = append(relyOnList, ip)
+					}
+				}
+				*matchNodeList = util.IntersectionString(*matchNodeList, relyOnList)
+			} else if relations.TargetProductName == productName && relations.TargetServiceName == svcName {
+				//本服务被来源服务所依赖，查询来源服务编排信息
+				oldServiceIpList, err := model.DeployServiceIpList.GetServiceIpList(clusterId, relations.SourceProductName, relations.SourceServiceName)
+				if err != nil {
+					log.Errorf("%v", err)
+					return
+				}
+				//来源服务没有编排记录，主机列表不做处理
+				if len(oldServiceIpList) == 0 {
+					continue
+				}
+				//来源服务有编排记录，有主机角色不匹配，本服务不再编排; 主机角色全部匹配，按照亲和性编排,匹配上的主机数量 < maxReplica 后续处理
+				relyOnList := make([]string, 0)
+				for _, ip := range oldServiceIpList {
+					if _, ok := matchNodeMap[ip]; !ok {
+						*matchNodeList = (*matchNodeList)[0:0]
+						return
+					} else {
+						relyOnList = append(relyOnList, ip)
+					}
+				}
+				*matchNodeList = util.IntersectionString(*matchNodeList, relyOnList)
+			}
+		}
+	}
 }
 
 //反亲和性选择
@@ -1193,28 +1594,30 @@ func antiAffinitySelect(res *[]string, antiAffinity []string, roleHostMap map[st
 }
 
 //根据 主机角色信息与最大副本数编排服务
-func selectHostByRoleAndMaxReplica(orchestration *schema.AffinityStruct, roleHostMap map[string][]string, maxReplica int, matchSidList []string, productName, svcName string) ([]string, error) {
+func selectHostByRoleAndMaxReplica(orchestration *schema.AffinityStruct, roleHostMap map[string][]string, maxReplica, clusterId int, matchIpList []string,
+	productName, svcName string, svcRelations []model.DeployServiceRelationsInfo, hostInfoMap map[string]model.HostRunningInfo) ([]string, error) {
+	//未设置亲和性的服务跳过编排
+	if orchestration == nil || len(orchestration.Affinity) == 0 {
+		return nil, fmt.Errorf("产品包：%s 服务名：%s,未设置亲和性", productName, svcName)
+	}
 
 	//亲和性选择
-	affinitySelect(&matchSidList, orchestration.Affinity, roleHostMap)
+	affinitySelect(&matchIpList, orchestration.Affinity, roleHostMap, svcRelations, productName, svcName, maxReplica, clusterId, hostInfoMap)
 
 	//反亲和性选择
-	antiAffinitySelect(&matchSidList, orchestration.AntiAffinity, roleHostMap)
+	//antiAffinitySelect(&matchSidList, orchestration.AntiAffinity, roleHostMap)
 
-	// 如果 未匹配到足够的主机
-	if maxReplica > len(matchSidList) {
-		return nil, fmt.Errorf("产品包：%s 服务名：%s 最大副本数为%d,但是仅仅匹配到%d台主机", productName, svcName, maxReplica, len(matchSidList))
+	//如果未匹配到任何主机
+	if len(matchIpList) == 0 {
+		return nil, fmt.Errorf("产品包：%s 服务名：%s,未匹配到任何主机", productName, svcName)
 	}
 
-	//排序后取前maxReplica台机器
-	sort.Strings(matchSidList)
-	// maxReplica 为 0 代表匹配到的都安装
-	if maxReplica == 0 {
-		return matchSidList, nil
-	} else {
-		return matchSidList[:maxReplica], nil
+	// 如果未匹配到足够的主机
+	if maxReplica > len(matchIpList) {
+		return nil, fmt.Errorf("产品包：%s 服务名：%s 最大副本数为%d,但是仅仅匹配到%d台主机", productName, svcName, maxReplica, len(matchIpList))
 	}
 
+	return matchIpList, nil
 }
 
 var autoDeployContextCancelMapMutex sync.Mutex
@@ -1226,8 +1629,10 @@ var autoDeployContextCancelMap = map[uuid.UUID]sysContext.CancelFunc{}
 func AutoDeploy(ctx context.Context) apibase.Result {
 	log.Debugf("AutoDeploy: %v", ctx.Request().RequestURI)
 	var reqParams struct {
-		ClusterId   int           `json:"cluster_id"`
-		ProductInfo []productInfo `json:"product_info"`
+		ClusterId          int           `json:"cluster_id"`
+		ProductLineName    string        `json:"product_line_name"`
+		ProductLineVersion string        `json:"product_line_version"`
+		ProductInfo        []productInfo `json:"product_info"`
 	}
 
 	err := ctx.ReadJSON(&reqParams)
@@ -1235,7 +1640,7 @@ func AutoDeploy(ctx context.Context) apibase.Result {
 		log.Errorf(" Parse reqParams err %v", err)
 		return err
 	}
-	//检查是否没有设置 ip
+	//检查是否没有设置 ip、冲突和依赖关系
 	for _, info := range reqParams.ProductInfo {
 		pInfo, err := model.DeployProductList.GetProductInfoById(info.Id)
 
@@ -1246,9 +1651,18 @@ func AutoDeploy(ctx context.Context) apibase.Result {
 		if err = setSchemaFieldServiceAddr(reqParams.ClusterId, sc, model.USE_MYSQL_DB(), ""); err != nil {
 			return err
 		}
+		//获取服务之间的冲突和依赖关系
+		err, svcRelations := model.DeployServiceRelationsList.GetServiceRelationsList()
+		if err != nil {
+			return err
+		}
 		for _, svcName := range info.ServiceList {
-			if sc.Service[svcName].ServiceAddr.IP == nil {
-				return fmt.Errorf("service `%v` have not set ip", svcName)
+			if sc.Service[svcName].ServiceAddr == nil || sc.Service[svcName].ServiceAddr.IP == nil {
+				return fmt.Errorf("服务 `%v` 未完善资源分配", svcName)
+			}
+			if err = CheckServiceConflictAndRelyOn(reqParams.ClusterId, info.Name, svcName, svcRelations, info.UncheckServiceList); err != nil {
+				log.Errorf("%v", err)
+				return err
 			}
 		}
 	}
@@ -1264,6 +1678,10 @@ func AutoDeploy(ctx context.Context) apibase.Result {
 		return nil
 	}
 	userId, err := ctx.Values().GetInt("userId")
+	if err != nil {
+		log.Errorf("%v", err)
+		return err
+	}
 
 	go func(sysCtx sysContext.Context, autoDeployUUID uuid.UUID) {
 
@@ -1273,63 +1691,57 @@ func AutoDeploy(ctx context.Context) apibase.Result {
 			return
 		default:
 			{
-				pInfoMap := map[string]productDeployInfo{}
-				var pidList []string
-				productUUIDMap := map[int]uuid.UUID{}
-				var hasDTFront bool
-				for _, product := range reqParams.ProductInfo {
-					if product.Name == DTFrontProductName {
-						hasDTFront = true
-					}
-					//预先为每一个产品包生成好 uuid
-					productUUIDMap[product.Id] = uuid.NewV4()
-					info, err := model.DeployProductList.GetProductInfoById(product.Id)
-					if err != nil {
-						log.Errorf("%v", err)
-						return
-					}
-					var svcDeployInfos []svcDeployInfo
-					sc, err := schema.Unmarshal(info.Product)
-					if err != nil {
-						log.Errorf("%v", err)
-						return
-					}
-					pidList = append(pidList, strconv.Itoa(product.Id))
-					for _, name := range product.ServiceList {
-						svcDeployInfos = append(svcDeployInfos, svcDeployInfo{
-							Name:    name,
-							SidList: nil,
-						})
-					}
-					pInfoMap[product.Name] = productDeployInfo{
-						Pid:                product.Id,
-						Name:               product.Name,
-						UncheckServiceList: product.UncheckServiceList,
-						ServiceSeq:         svcDeployInfos,
-						Schema:             sc,
-					}
-				}
-				productDeployInfos, err := getProductInfoSeq(pidList, pInfoMap, reqParams.ProductInfo)
-
-				if err != nil {
-					log.Errorf("%v", err)
+				//根据产品线解析产品包部署顺序
+				productLineInfo, err := model.DeployProductLineList.GetProductLineListByNameAndVersion(reqParams.ProductLineName, reqParams.ProductLineVersion)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					log.Errorf("[Cluster->AutoDeploy] get product line err: %v", err)
 					return
 				}
-				//childUUID部署前入库  以便 list 接口判断整个流程的状态  以所有 childUUID 的状态判断自动部署的状态
-				for pid, UUID := range productUUIDMap {
-					err := model.DeployUUID.InsertOne(UUID.String(), autoDeployUUID.String(), model.AutoDeployChildrenUUIDType, pid)
-					if err != nil {
-						return
+				if errors.Is(err, sql.ErrNoRows) {
+					log.Errorf("产品线 `%v(%v)` 不存在", reqParams.ProductLineName, reqParams.ProductLineVersion)
+					return
+				}
+				var productDeployInfos []productDeployInfo
+				deploySerial, err := GetProductLineDeploySerial(*productLineInfo)
+				if err != nil {
+					log.Errorf("[Cluster->AutoDeploy] GetProductLineDeploySerial error: %v", err)
+					return
+				}
+
+				for _, pInfo := range deploySerial {
+					for _, product := range reqParams.ProductInfo {
+						if pInfo.ProductName == product.Name {
+							info, err := model.DeployProductList.GetProductInfoById(product.Id)
+							if err != nil {
+								log.Errorf("%v", err)
+								return
+							}
+							var svcDeployInfos []svcDeployInfo
+							sc, err := schema.Unmarshal(info.Product)
+							if err != nil {
+								log.Errorf("%v", err)
+								return
+							}
+							for _, name := range product.ServiceList {
+								svcDeployInfos = append(svcDeployInfos, svcDeployInfo{
+									Name:    name,
+									SidList: nil,
+								})
+							}
+							productDeployInfos = append(productDeployInfos, productDeployInfo{
+								Pid:                product.Id,
+								Name:               product.Name,
+								UncheckServiceList: product.UncheckServiceList,
+								ServiceSeq:         svcDeployInfos,
+								Schema:             sc,
+							})
+						}
 					}
 				}
 
 				var pidSeq []string
 				for _, info := range productDeployInfos {
 					pidSeq = append(pidSeq, strconv.Itoa(info.Pid))
-				}
-				//如果有 DTFront 特殊处理 DTFront 要在所有全部正常部署后再重新部署 DTFront 所以 pidSeq 要加上 DTFront
-				if hasDTFront {
-					pidSeq = append(pidSeq, strconv.Itoa(productDeployInfos[0].Pid))
 				}
 
 				//将本次实际部署的 pidList 入库 与 autoDeployUUID 关联  当取消自动部署的时候，关联出 pidList
@@ -1343,9 +1755,14 @@ func AutoDeploy(ctx context.Context) apibase.Result {
 					if err != nil {
 						return
 					}
+					productUUID := uuid.NewV4()
+					err = model.DeployUUID.InsertOne(productUUID.String(), autoDeployUUID.String(), model.AutoDeployChildrenUUIDType, info.Pid)
+					if err != nil {
+						return
+					}
 					log.Debugf("正在自动部署 %s", infoById.ProductName)
 					//传入 parentCtx 当parentCtx停止时，由其生成的子 context 都将退出
-					dealDeployRes := autoDealDeploy(ctx, sysCtx, infoById.ProductName, infoById.ProductVersion, info.UncheckServiceList, userId, reqParams.ClusterId, productUUIDMap[info.Pid])
+					dealDeployRes := autoDealDeploy(ctx, sysCtx, infoById.ProductName, infoById.ProductVersion, info.UncheckServiceList, userId, reqParams.ClusterId, productUUID)
 					log.Debugf("%s自动部署完成", infoById.ProductName)
 					if _, ok := dealDeployRes.(error); ok {
 						log.Errorf("%s自动部署失败", infoById.ProductName)
@@ -1353,28 +1770,49 @@ func AutoDeploy(ctx context.Context) apibase.Result {
 					}
 				}
 
-				//最后部署下DTFront
-				if hasDTFront {
-					//根据算法 DTFront 的一定在编排后的部署顺序中的第一个
-					dtFrontInfo := productDeployInfos[0]
-					infoById, err := model.DeployProductList.GetProductInfoById(dtFrontInfo.Pid)
-					if err != nil {
-						return
-					}
-					log.Debugf("正在自动部署 %s", infoById.ProductName)
-					dealDeployRes := autoDealDeploy(ctx, sysCtx, infoById.ProductName, infoById.ProductVersion, dtFrontInfo.UncheckServiceList, userId, reqParams.ClusterId, productUUIDMap[dtFrontInfo.Pid])
-					log.Debugf("%s自动部署完成", infoById.ProductName)
-					if _, ok := dealDeployRes.(error); ok {
-						log.Errorf("%s自动部署失败", infoById.ProductName)
-						return
-					}
-				}
 				log.Debugf("自动部署全部完成 autoDeployUUID= %s ", autoDeployUUID)
 				return
 			}
 		}
 	}(sysCtx, autoDeployUUID)
 	return map[string]interface{}{"deploy_uuid": autoDeployUUID}
+}
+
+func CheckServiceConflictAndRelyOn(clusterId int, productName, serviceName string, svcRelations []model.DeployServiceRelationsInfo, uncheckedServices []string) error {
+	serviceIpList, err := model.DeployServiceIpList.GetServiceIpList(clusterId, productName, serviceName)
+	if err != nil {
+		return err
+	}
+
+	for _, relations := range svcRelations {
+		var err error
+		var oldServiceIpList = make([]string, 0)
+		var oldServiceName string
+		if relations.SourceProductName == productName && relations.SourceServiceName == serviceName {
+			oldServiceIpList, err = model.DeployServiceIpList.GetServiceIpList(clusterId, relations.TargetProductName, relations.TargetServiceName)
+			oldServiceName = relations.TargetServiceName
+		} else if relations.TargetProductName == productName && relations.TargetServiceName == serviceName {
+			oldServiceIpList, err = model.DeployServiceIpList.GetServiceIpList(clusterId, relations.SourceProductName, relations.SourceServiceName)
+			oldServiceName = relations.SourceServiceName
+		}
+		if err != nil {
+			log.Errorf("%v", err)
+			return err
+		}
+		if !util.StringContain(uncheckedServices, oldServiceName) && relations.RelationsType == model.RELATIONS_TYPE_CONFLICT && len(oldServiceIpList) > 0 {
+			conflictList := util.IntersectionString(serviceIpList, oldServiceIpList)
+			if len(conflictList) > 0 {
+				return fmt.Errorf("存在部署冲突！`%v` 只允许编排 `%v` 所在主机范围外的主机", serviceName, oldServiceName)
+			}
+		} else if !util.StringContain(uncheckedServices, oldServiceName) && relations.RelationsType == model.RELATIONS_TYPE_RELYON && len(oldServiceIpList) > 0 {
+			relyOnList := util.IntersectionString(serviceIpList, oldServiceIpList)
+			if len(relyOnList) == 0 {
+				return fmt.Errorf("存在部署依赖！`%v` 只允许编排 `%v` 所在主机范围内的主机", serviceName, oldServiceName)
+			}
+		}
+	}
+
+	return nil
 }
 
 // AutoDeployCancel 取消自动部署过程
@@ -1575,7 +2013,7 @@ func autoDealDeploy(ctx context.Context, parentCtx sysContext.Context, productNa
 	}
 
 	//todo: opid
-	deploy(sc, deployUUID, productListInfo.ID, childrenCtx, uncheckedServices, clusterId, 0, operationId)
+	deploy(sc, deployUUID, productListInfo.ID, childrenCtx, uncheckedServices, clusterId, 0, operationId, "", false)
 
 	return nil
 }
@@ -4051,6 +4489,7 @@ func getK8SBaseServicInfo(s sqlxer, baseProduct, baseProductVersion, baseService
 // 给非依赖服务组件设置ip和host为servicename以及修改变更后的一些字段配置信息
 func setSchemaFieldDNS(clusterId int, sc *schema.SchemaConfig, s sqlxer, namespace string) error {
 	var infoList []model.SchemaFieldModifyInfo
+	var dns string
 	query := "SELECT service_name, field_path, field FROM " + model.DeploySchemaFieldModify.TableName + " WHERE product_name=? AND cluster_id=? AND namespace=?"
 	if err := model.USE_MYSQL_DB().Select(&infoList, query, sc.ProductName, clusterId, namespace); err != nil {
 		return err
@@ -4077,14 +4516,89 @@ func setSchemaFieldDNS(clusterId int, sc *schema.SchemaConfig, s sqlxer, namespa
 			sc.SetServiceAddr(name, ips, hosts)
 		} else {
 			// 非使用云服务主机设置服务为service name
-			dns := kmodel.BuildResourceNameWithNamespace("service", sc.ParentProductName, sc.ProductName, name, namespace)
-			if dns != "" {
-				ips := strings.Split(dns, IP_LIST_SEP)
-				sc.SetServiceAddr(name, ips, ips)
+			switch sc.DeployType {
+			case "workload":
+				// 获取workload的类型信息
+				wl, err := modelkube.WorkloadDefinition.Get(name, "")
+				if err != nil {
+					return fmt.Errorf("get workload type error: %v", err)
+				}
+				if wl == nil {
+					// 若shcema产品包中的服务名不存在对应的workload type那么就用默认的命名规则
+					buildMoleResourceServiceName("service", sc.ParentProductName, sc.ProductName, name, namespace, sc)
+					continue
+				}
+				// 根据workload的id获取对应部署的k8s资源类型为deployment还是sts
+				parts, err := modelkube.WorkloadPart.Select(wl.Id)
+				if err != nil {
+					return fmt.Errorf("get workload_part error: %v", err)
+				}
+				if parts == nil {
+					return fmt.Errorf("get the part of workload type %s is null, please check the workload type", name)
+				}
+				//根据workload_part的ID获取对应service类型的steps
+				workloadstep := []modelkube.WorloadStepSchema{}
+				wkstep_query := "select * from workload_step where type='service' and workloadpart_id=?"
+				if err := model.USE_MYSQL_DB().Select(&workloadstep, wkstep_query, parts[0].Id); err != nil {
+					log.Errorf("get workload_step error:%v, sql:%v\n", err, wkstep_query)
+					return fmt.Errorf("get workload_step error:%v, sql:%v\n", err, wkstep_query)
+				}
+				if workloadstep == nil {
+					// 若shcema产品包中的服务名存在对应的workload type且对应的workload type没有定义对应的service资源，则使用默认的命名规则
+					buildMoleResourceServiceName("service", sc.ParentProductName, sc.ProductName, name, namespace, sc)
+					continue
+				}
+
+				switch parts[0].Type {
+				case "statefulset":
+					var stepSvcName string
+					/*
+						一个statefulset资源有可能存在两种service类型headless和cluster，若存在一种service类型即cluster类型的
+						则直接获取该workload服务组件对应的service name，若存在两中类型的service则获取headless类型的service name
+					*/
+					if len(workloadstep) < 2 {
+						dns = kmodel.BuildWorkloadServiceName(sc.ProductName, name, parts[0].Name, workloadstep[0].Name, namespace)
+					} else {
+						for _, stepSvc := range workloadstep {
+							if exist := strings.Contains(stepSvc.Object, "clusterIP"); exist {
+								stepSvcName = stepSvc.Name
+							}
+						}
+						svcName := kmodel.BuildWorkloadServiceName(sc.ProductName, name, parts[0].Name, stepSvcName, namespace)
+						//statefulset类型资源默认获取第一个pod为主角色
+						podName := kmodel.BuildWorkloadPodName(sc.ProductName, name, parts[0].Name, "0")
+						dns = podName + "." + svcName
+					}
+					if dns != "" {
+						ips := strings.Split(dns, IP_LIST_SEP)
+						sc.SetServiceAddr(name, ips, ips)
+					}
+				default:
+					dns := kmodel.BuildWorkloadServiceName(sc.ProductName, name, parts[0].Name, workloadstep[0].Name, namespace)
+					if dns != "" {
+						ips := strings.Split(dns, IP_LIST_SEP)
+						sc.SetServiceAddr(name, ips, ips)
+					}
+				}
+			default:
+				dns = kmodel.BuildResourceNameWithNamespace("service", sc.ParentProductName, sc.ProductName, name, namespace)
+				if dns != "" {
+					ips := strings.Split(dns, IP_LIST_SEP)
+					sc.SetServiceAddr(name, ips, ips)
+				}
 			}
+
 		}
 	}
 	return nil
+}
+
+func buildMoleResourceServiceName(resourceType, parentProductName, productName, serviceName, namespace string, sc *schema.SchemaConfig) {
+	dns := kmodel.BuildResourceNameWithNamespace(resourceType, parentProductName, productName, serviceName, namespace)
+	if dns != "" {
+		ips := strings.Split(dns, IP_LIST_SEP)
+		sc.SetServiceAddr(serviceName, ips, ips)
+	}
 }
 
 // 处理当前集群指定namespace下产品包的参数修改信息
@@ -4339,7 +4853,7 @@ func k8sDeploy(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, unchecked
 			IsDeploy:  0,
 		}
 		// wait deploy
-		time.Sleep(5 * time.Second)
+		//time.Sleep(5 * time.Second)
 		model.DeployKubeProductLock.InsertOrUpdateRecord(lock)
 
 		//tmp code
@@ -4694,9 +5208,9 @@ func StopUndeployingK8sProduct(ctx context.Context) apibase.Result {
 		return fmt.Errorf("pid is empty")
 	}
 	namespace := ctx.Params().Get("namespace_name")
-	if namespace == "" {
-		return fmt.Errorf("namespace is empty")
-	}
+	//if namespace == "" {
+	//	return fmt.Errorf("namespace is empty")
+	//}
 
 	productRel, err := model.DeployClusterProductRel.GetByPidAndClusterIdNamespacce(pid, clusterId, namespace)
 	if err != nil {
@@ -5582,12 +6096,12 @@ func UpdateOperationStatusBySeq(seq int) error {
 }
 
 func IsShowLog(ctx context.Context) apibase.Result {
-	log.Debugf("IsShowLog: %v", ctx.Request().RequestURI)
+	//log.Debugf("IsShowLog: %v", ctx.Request().RequestURI)
 	seq, err := ctx.URLParamInt("seq")
 	if err != nil {
 		return err
 	}
-	log.Debugf("IsShowLog parmas : %d", seq)
+	//log.Debugf("IsShowLog parmas : %d", seq)
 	isExist, err := model.ExecShellList.IsExist(seq)
 	if err != nil {
 		return err

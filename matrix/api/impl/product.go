@@ -23,9 +23,11 @@ import (
 	sysContext "context"
 	"database/sql"
 	dbhelper "dtstack.com/dtstack/easymatrix/go-common/db-helper"
+	"dtstack.com/dtstack/easymatrix/matrix/cache"
 	"dtstack.com/dtstack/easymatrix/matrix/encrypt"
 	"dtstack.com/dtstack/easymatrix/matrix/encrypt/aes"
 	"dtstack.com/dtstack/easymatrix/matrix/enums"
+	"dtstack.com/dtstack/easymatrix/matrix/model/upgrade"
 	"dtstack.com/dtstack/easymatrix/matrix/workload"
 	"encoding/gob"
 	"encoding/json"
@@ -122,6 +124,76 @@ func sqlTransfer(input string) string {
 	return input
 }
 
+func checkSmoothUpgradeServiceAddr(clusterId int, productName, productVersion string, isFinalUpgrade bool) error {
+	//校验mysql地址更改
+	var mysqlServiceName = "mysql"
+	info, err := model.DeployProductList.GetByProductNameAndVersion(productName, productVersion)
+	if err != nil {
+		log.Errorf("get from deployproductlist err: %v", err)
+		return err
+	}
+	sc, err := schema.Unmarshal(info.Product)
+	if err != nil {
+		log.Errorf("Unmarshal err: %v", err)
+		return err
+	}
+	if err = inheritBaseService(clusterId, sc, model.USE_MYSQL_DB()); err != nil {
+		log.Errorf("inheritBaseService err: %+v", err)
+		return err
+	}
+	if err := setSchemaFieldServiceAddr(clusterId, sc, model.USE_MYSQL_DB(), ""); err != nil {
+		log.Errorf("setSchemaFieldServiceAddr err: %v", err)
+		return err
+	}
+	mysqlIPList, err := model.DeployMysqlIpList.GetMysqlIpList(clusterId, productName)
+	if err != nil {
+		log.Errorf("get mysql ip list error:%v", err)
+		return err
+	}
+	var oldMysqlIpList []string
+	if sc.Service[mysqlServiceName].ServiceAddr != nil {
+		oldMysqlIpList = sc.Service[mysqlServiceName].ServiceAddr.IP
+	}
+	//平滑升级中提示修改数据库地址
+	if !isFinalUpgrade && CompareIpList(mysqlIPList, oldMysqlIpList) {
+		return fmt.Errorf("服务 `%v` 未完善资源分配", mysqlServiceName)
+	}
+	//最终一次平滑升级提示修改数据库地址
+	if isFinalUpgrade && !CompareIpList(mysqlIPList, oldMysqlIpList) {
+		return fmt.Errorf("服务 `%v` 未完善资源分配", mysqlServiceName)
+	}
+
+	//校验平滑升级的服务编排
+	_, err = model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterId(productName, clusterId)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Errorf("%v", err)
+		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		smoothUpgradeList, err := upgrade.SmoothUpgrade.GetByProductName(productName)
+		if err != nil {
+			log.Errorf("%v", err)
+			return err
+		}
+		for _, info := range smoothUpgradeList {
+			SelectIpList, err := model.DeployServiceIpList.GetServiceIpList(clusterId, productName, info.ServiceName)
+			if err != nil {
+				log.Errorf("%v", err)
+				return err
+			}
+			var UnselectIpList []string
+			instanceList, _ := model.DeployInstanceList.GetInstanceBelongService(productName, info.ServiceName, clusterId)
+			for _, instance := range instanceList {
+				UnselectIpList = append(UnselectIpList, instance.Ip)
+			}
+			if len(SelectIpList) == len(UnselectIpList) {
+				return fmt.Errorf("服务 `%v` 未完善资源分配", info.ServiceName)
+			}
+		}
+	}
+	return nil
+}
+
 func inheritBaseService(clusterId int, sc *schema.SchemaConfig, s sqlxer) error {
 	var err error
 	for _, name := range sc.GetBaseService() {
@@ -178,18 +250,35 @@ func getBaseServicInfo(s sqlxer, baseProduct, baseService, baseAttri string, rel
 	log.Infof("get basic info sql: %s", query)
 
 	if err = s.Get(&productParsed, query, baseProduct, clusterId, model.PRODUCT_STATUS_DEPLOYED, relynamespace); err == sql.ErrNoRows {
-		err = fmt.Errorf("not found such deployed product %s", baseProduct)
-		if baseAttri == BASE_SERVICE_OPTIONAL {
+		if baseAttri != BASE_SERVICE_OPTIONAL {
+			//若依赖关系为强依赖，则返回查询不到已部署的组件包
+			err = fmt.Errorf("not found such deployed product %s", baseProduct)
+			return
+		}
+	} else if err != nil {
+		return
+	}
+	//若依赖关系为弱依赖（optional）且未查询到已部署的依赖组件，去除部署条件再次查询，查询是否存在部署失败的组件。若不存在返回默认
+	if err == sql.ErrNoRows && baseAttri == BASE_SERVICE_OPTIONAL {
+		query = fmt.Sprintf("SELECT %s.product_parsed FROM %s LEFT JOIN %s ON %s.id = %s.pid WHERE"+
+			" product_name=? AND clusterId=? AND %s.namespace=?",
+			model.DeployClusterProductRel.TableName,
+			model.DeployProductList.TableName,
+			model.DeployClusterProductRel.TableName,
+			model.DeployProductList.TableName,
+			model.DeployClusterProductRel.TableName,
+			model.DeployClusterProductRel.TableName)
+		log.Infof("get optional basic info sql: %s", query)
+		if err = s.Get(&productParsed, query, baseProduct, clusterId, relynamespace); err == sql.ErrNoRows {
 			configMap = nil
 			ips = BASE_SERVICE_DEFAUL_IPS
 			hosts = BASE_SERVICE_DEFAUL_HOSTS
 			err = nil
+			return
+		} else if err != nil {
+			return
 		}
-		return
-	} else if err != nil {
-		return
 	}
-
 	sc, err := schema.Unmarshal(productParsed)
 	if err != nil {
 		return
@@ -424,7 +513,7 @@ func UnzipAndParse(f io.Reader, userId int) (rlt apibase.Result) {
 			rlt = r
 		}
 	}()
-
+	var pid int64
 	tr := tar.NewReader(f)
 	for {
 		hdr, err := tr.Next()
@@ -493,9 +582,11 @@ func UnzipAndParse(f io.Reader, userId int) (rlt apibase.Result) {
 			query := "INSERT INTO " + model.DeployProductList.TableName +
 				" (deploy_uuid,product_parsed,parent_product_name, product_name, product_name_display, product_version, product, is_current_version, `status`, `schema`, `user_id`, `product_type`) VALUES" +
 				" (:deploy_uuid,:product_parsed,:parent_product_name, :product_name, :product_name_display, :product_version, :product, :is_current_version, :status, :schema, :user_id, :product_type)"
-			if _, err = tx.NamedExec(query, &info); err != nil {
+			var ret sql.Result
+			if ret, err = tx.NamedExec(query, &info); err != nil {
 				return err
 			}
+			pid, _ = ret.LastInsertId()
 			//if err = inheritBaseService(sc, tx); err != nil {
 			//	log.Errorf("Upload inheritBaseService warn: %+v", err)
 			//}
@@ -731,7 +822,11 @@ func UnzipAndParse(f io.Reader, userId int) (rlt apibase.Result) {
 		}
 		return msg
 	} else {
-		return nil
+		return map[string]interface{}{
+			"pid":            pid,
+			"productName":    sc.ProductName,
+			"productVersion": sc.ProductVersion,
+		}
 	}
 }
 
@@ -1134,253 +1229,6 @@ func downloadPatches(updateUUID uuid.UUID, serviceInfo model.InstanceAndProductI
 	return nil
 }
 
-//func ProductInfo(ctx context.Context) apibase.Result {
-//	var deployStatus []string
-//	if status := ctx.URLParam("deploy_status"); status != "" {
-//		deployStatus = strings.Split(status, ",")
-//	}
-//	parentProductName := ctx.URLParam("parentProductName")
-//	productNames := ctx.URLParam("productName")
-//	productVersionLike := sqlTransfer(ctx.URLParam("productVersion"))
-//	productName := ctx.Params().Get("product_name")
-//	productVersion := ctx.Params().Get("product_version")
-//	clusterId := ctx.URLParam("clusterId")
-//	productType := ctx.URLParam("product_type")
-//	namespce := ctx.GetCookie(COOKIE_CURRENT_K8S_NAMESPACE)
-//	mode := ctx.URLParam("mode")
-//	if mode != "" {
-//		namespce = ""
-//	}
-//
-//	// 获取ProductId
-//	var cid int
-//	type productRel struct {
-//		ClusterId  int
-//		IsExist    bool
-//		Status     string
-//		DeployUUID string
-//		DeployTime dbhelper.NullTime
-//		Namespace  string
-//		UserId     int
-//	}
-//	// 获取集群下所有部署的产品包
-//	productSet := make(map[int]productRel)
-//	if clusterId != "" {
-//		cid, _ = strconv.Atoi(clusterId)
-//		productRelList := make([]model.ClusterProductRel, 0)
-//		var err error
-//		if namespce != "" {
-//			productRelList, err = model.DeployClusterProductRel.GetListByClusterIdAndStatus(cid, deployStatus, namespce)
-//			if err != nil {
-//				return fmt.Errorf("Database err:%v", err)
-//			}
-//		} else {
-//			productRelList, err = model.DeployClusterProductRel.GetListByClusterIdAndStatus(cid, deployStatus, "")
-//			if err != nil {
-//				return fmt.Errorf("Database err:%v", err)
-//			}
-//		}
-//		for _, v := range productRelList {
-//			productSet[v.Pid] = productRel{
-//				ClusterId:  cid,
-//				IsExist:    true,
-//				Status:     v.Status,
-//				DeployTime: v.DeployTime,
-//				DeployUUID: v.DeployUUID,
-//				Namespace:  v.Namespace,
-//				UserId:     v.UserId,
-//			}
-//		}
-//	} else {
-//		// get clusterId with cookie if have
-//		var err error
-//		productRelList := make([]model.ClusterProductRel, 0)
-//		cid, err = GetCurrentClusterId(ctx)
-//		if err == nil {
-//			if namespce != "" {
-//				productRelList, err = model.DeployClusterProductRel.GetListByClusterIdAndStatus(cid, deployStatus, namespce)
-//				if err != nil {
-//					return fmt.Errorf("Database err:%v", err)
-//				}
-//			} else {
-//				productRelList, err = model.DeployClusterProductRel.GetListByClusterIdAndStatus(cid, deployStatus, "")
-//				if err != nil {
-//					return fmt.Errorf("Database err:%v", err)
-//				}
-//			}
-//
-//			for _, v := range productRelList {
-//				productSet[v.Pid] = productRel{
-//					ClusterId:  cid,
-//					IsExist:    true,
-//					Status:     v.Status,
-//					DeployTime: v.DeployTime,
-//					Namespace:  v.Namespace,
-//				}
-//			}
-//		}
-//	}
-//	// 过滤出指定集群下的产品包信息
-//	info, _ := model.DeployProductList.GetDeployProductList(nil, parentProductName, productNames, productName, productVersionLike, productVersion, productType)
-//	list := []map[string]interface{}{}
-//	result := make([]model.DeployProductListInfo, 0)
-//	for _, product := range info {
-//		if cid > 0 && !productSet[product.ID].IsExist { //过滤不属于cluster的product
-//			continue
-//		}
-//		result = append(result, product)
-//	}
-//	count := len(result)
-//	pagination := apibase.GetPaginationFromQueryParameters(nil, ctx, nil)
-//	// 重写排序
-//	switch pagination.SortBy {
-//	case "product_version":
-//		sort.SliceStable(result, func(i, j int) bool {
-//			if pagination.SortDesc {
-//				return result[i].ProductVersion > result[j].ProductVersion
-//			} else {
-//				return result[i].ProductVersion < result[j].ProductVersion
-//			}
-//		})
-//	case "deploy_time":
-//		sort.SliceStable(result, func(i, j int) bool {
-//			if pagination.SortDesc {
-//				return result[i].DeployTime.Time.After(result[j].DeployTime.Time)
-//			} else {
-//				return !result[i].DeployTime.Time.After(result[j].DeployTime.Time)
-//			}
-//		})
-//	case "create_time":
-//		sort.SliceStable(result, func(i, j int) bool {
-//			if pagination.SortDesc {
-//				return result[i].CreateTime.Time.After(result[j].CreateTime.Time)
-//			} else {
-//				return !result[i].CreateTime.Time.After(result[j].CreateTime.Time)
-//			}
-//		})
-//	}
-//	// 重写分页
-//	total := len(result) // result总数量
-//	if pagination.Start > 0 {
-//		if pagination.Start+pagination.Limit < total {
-//			result = result[pagination.Start : pagination.Start+pagination.Limit]
-//		} else if pagination.Start > total {
-//			result = nil
-//		} else {
-//			result = result[pagination.Start:total]
-//		}
-//	} else {
-//		if pagination.Limit == 0 {
-//			result = result[:total]
-//		} else if pagination.Limit < total {
-//			result = result[:pagination.Limit]
-//		}
-//	}
-//
-//	for _, s := range result {
-//		sc, err := schema.Unmarshal(s.Product)
-//		if err != nil {
-//			log.Errorf("[ProductInfo] Unmarshal err: %v", err)
-//			return err
-//		}
-//		// 填写该产品对应的依赖其它组件的信息
-//		if cid > 0 {
-//			if err = inheritBaseService(cid, sc, model.USE_MYSQL_DB()); err != nil {
-//				log.Errorf("[ProductInfo] inheritBaseService warn: %+v", err)
-//			}
-//			if err = setSchemaFieldServiceAddr(cid, sc, model.USE_MYSQL_DB(), namespce); err != nil {
-//				log.Errorf("[ProductInfo] setSchemaFieldServiceAddr err: %v", err)
-//				return err
-//			}
-//			if err = handleUncheckedServices(sc, s.ID, cid, namespce); err != nil {
-//				log.Errorf("[ProductInfo] handleUncheckedServices warn: %+v", err)
-//			}
-//		}
-//		if err = sc.ParseVariable(); err != nil {
-//			log.Errorf("[ProductInfo] product info err: %v", err)
-//			return err
-//		}
-//		err, userInfo := model.UserList.GetInfoByUserId(1)
-//		if err != nil {
-//			log.Errorf("GetInfoByUserId %v", err)
-//			return err
-//		}
-//		reg := regexp.MustCompile(`(?i).*password.*`)
-//		for _, serviceConfig := range sc.Service {
-//			for key, configItem := range serviceConfig.Config {
-//				if reg.Match([]byte(key)) {
-//
-//					defaultValue, err := util.AesEncryptByPassword(fmt.Sprintf("%s", *(configItem.(schema.VisualConfig).Default.(*string))), userInfo.PassWord)
-//
-//					if err != nil {
-//						return err
-//					}
-//					value, err := util.AesEncryptByPassword(fmt.Sprintf("%s", *(configItem.(schema.VisualConfig).Value.(*string))), userInfo.PassWord)
-//					if err != nil {
-//						return err
-//					}
-//					serviceConfig.Config[key] = schema.VisualConfig{
-//						Default: defaultValue,
-//						Desc:    configItem.(schema.VisualConfig).Desc,
-//						Type:    configItem.(schema.VisualConfig).Type,
-//						Value:   value,
-//					}
-//				}
-//			}
-//		}
-//
-//		m := map[string]interface{}{}
-//		m["id"] = s.ID
-//		m["product_name"] = s.ProductName
-//		m["product_name_display"] = s.ProductNameDisplay
-//		m["product_version"] = s.ProductVersion
-//		m["product"] = sc
-//		if productSet[s.ID].UserId > 0 {
-//			if err, userInfo := model.UserList.GetInfoByUserId(productSet[s.ID].UserId); err != nil {
-//				m["username"] = ""
-//			} else {
-//				m["username"] = userInfo.UserName
-//			}
-//		} else {
-//			m["username"] = ""
-//		}
-//		// 根据已安装的产品包id，获取该产品包对应的详细信息
-//		installed, err := model.DeployClusterProductRel.GetProductByPid(s.ID)
-//		if len(installed) > 0 {
-//			m["is_current_version"] = 1
-//		}
-//		m["status"] = productSet[s.ID].Status
-//		m["namespace"] = productSet[s.ID].Namespace
-//		m["deploy_uuid"] = productSet[s.ID].DeployUUID
-//		m["product_type"] = s.ProductType
-//		//kubernetes type not surpport upgrade
-//		if cid > 0 {
-//			m["can_upgrade"] = checkCanUpgrade(sc)
-//		}
-//		if productSet[s.ID].DeployTime.Valid == true {
-//			m["deploy_time"] = productSet[s.ID].DeployTime.Time.Format(base.TsLayout)
-//		} else {
-//			m["deploy_time"] = ""
-//		}
-//
-//		if s.CreateTime.Valid == true {
-//			m["create_time"] = s.CreateTime.Time.Format(base.TsLayout)
-//		} else {
-//			m["create_time"] = ""
-//		}
-//		// 当产品包的部署状态变为undeploying或deploying状态时重写can_upgrade属性
-//		if productSet[s.ID].Status == model.PRODUCT_STATUS_UNDEPLOYING || productSet[s.ID].Status == model.PRODUCT_STATUS_DEPLOYING {
-//			m["can_upgrade"] = false
-//		}
-//
-//		list = append(list, m)
-//	}
-//	return map[string]interface{}{
-//		"list":  list,
-//		"count": count,
-//	}
-//}
-
 // ProductInfo
 // @Description  	GET Product Info
 // @Summary      	获取产品信息
@@ -1405,7 +1253,8 @@ func ProductInfo(ctx context.Context) apibase.Result {
 	if productNames := ctx.URLParam("productName"); productNames != "" {
 		deployProductNames = strings.Split(productNames, ",")
 	}
-	productVersionLike := sqlTransfer(ctx.URLParam("productVersion"))
+	//productVersionLike := sqlTransfer(ctx.URLParam("productVersion"))
+	productVersionLike := ctx.URLParam("productVersion")
 	productName := ctx.Params().Get("product_name")
 	productVersion := ctx.Params().Get("product_version")
 	clusterId := ctx.URLParam("clusterId")
@@ -1443,159 +1292,229 @@ func ProductInfo(ctx context.Context) apibase.Result {
 		}
 	}
 
-	list := []map[string]interface{}{}
-	count := len(ProductListInfo)
-	pagination := apibase.GetPaginationFromQueryParameters(nil, ctx, nil)
-	switch pagination.SortBy {
-	case "product_version":
-		sort.SliceStable(ProductListInfo, func(i, j int) bool {
-			if pagination.SortDesc {
-				return ProductListInfo[i].ProductVersion > ProductListInfo[j].ProductVersion
-			} else {
-				return ProductListInfo[i].ProductVersion < ProductListInfo[j].ProductVersion
-			}
-		})
-	case "deploy_time":
-		sort.SliceStable(ProductListInfo, func(i, j int) bool {
-			if pagination.SortDesc {
-				return ProductListInfo[i].DeployTime.Time.After(ProductListInfo[j].DeployTime.Time)
-			} else {
-				return !ProductListInfo[i].DeployTime.Time.After(ProductListInfo[j].DeployTime.Time)
-			}
-		})
-	case "create_time":
-		sort.SliceStable(ProductListInfo, func(i, j int) bool {
-			if pagination.SortDesc {
-				return ProductListInfo[i].CreateTime.Time.After(ProductListInfo[j].CreateTime.Time)
-			} else {
-				return !ProductListInfo[i].CreateTime.Time.After(ProductListInfo[j].CreateTime.Time)
-			}
-		})
-	default:
-		// 默认以服务名排序
-		sort.SliceStable(ProductListInfo, func(i, j int) bool {
-			return strings.Compare(ProductListInfo[i].ProductName, ProductListInfo[j].ProductName) == -1
-		})
+	type SmoothUpgradeInfoRes struct {
+		Id                 int    `json:"id"`
+		ProductName        string `json:"product_name"`
+		ProductNameDisplay string `json:"product_name_display"`
+		ProductVersion     string `json:"product_version"`
+		IsCurrentVersion   int    `json:"is_current_version"`
+		Status             string `json:"status"`
+		NameSpace          string `json:"name_space"`
+		DeployUUID         string `json:"deploy_uuid"`
+		ProductType        int    `json:"product_type"`
+		CanRollback        bool   `json:"can_rollback"`
+		DeployTime         string `json:"deploy_time"`
+		CreateTime         string `json:"create_time"`
 	}
-	// 重写分页
-	total := len(ProductListInfo) // result总数量
-	if pagination.Start > 0 {
-		if pagination.Start+pagination.Limit < total {
-			ProductListInfo = ProductListInfo[pagination.Start : pagination.Start+pagination.Limit]
-		} else if pagination.Start > total {
-			ProductListInfo = nil
-		} else {
-			ProductListInfo = ProductListInfo[pagination.Start:total]
-		}
-	} else {
-		if pagination.Limit == 0 {
-			ProductListInfo = ProductListInfo[:total]
-		} else if pagination.Limit < total {
-			ProductListInfo = ProductListInfo[:pagination.Limit]
-		}
+	type ProductInfoRes struct {
+		Id                   int                   `json:"id"`
+		ProductName          string                `json:"product_name"`
+		ProductNameDisplay   string                `json:"product_name_display"`
+		ProductVersion       string                `json:"product_version"`
+		UserName             string                `json:"user_name"`
+		IsCurrentVersion     int                   `json:"is_current_version"`
+		Status               string                `json:"status"`
+		NameSpace            string                `json:"name_space"`
+		DeployUUID           string                `json:"deploy_uuid"`
+		ProductType          int                   `json:"product_type"`
+		CanUpgrade           bool                  `json:"can_upgrade"`
+		CanRollback          bool                  `json:"can_rollback"`
+		CanSmoothUpgrade     bool                  `json:"can_smooth_upgrade"`
+		SmoothUpgradeProduct *SmoothUpgradeInfoRes `json:"smooth_upgrade_product,omitempty"`
+		UpgradeService       []string              `json:"upgrade_service,omitempty"`
+		DeployTime           string                `json:"deploy_time"`
+		CreateTime           string                `json:"create_time"`
 	}
 
+	resultList := make([]ProductInfoRes, 0)
+	smoothUpgradeMap := make(map[string][]string)
 	for index, s := range ProductListInfo {
+		//获取平滑升级信息
+		smoothUpgradeList, err := upgrade.SmoothUpgrade.GetByProductName(s.ProductName)
+		if err != nil {
+			log.Errorf("SmoothUpgrade-query db error: %v", err)
+			return err
+		}
+		for _, su := range smoothUpgradeList {
+			smoothUpgradeMap[su.ProductName] = append(smoothUpgradeMap[su.ProductName], su.ServiceName)
+		}
+
+		var vFound, sFound bool
 		sc, err := schema.Unmarshal(s.Product)
 		if err != nil {
 			log.Errorf("[ProductInfo] Unmarshal err: %v", err)
 		}
-		// 填写该产品对应的依赖其它组件的信息
-		if cid > 0 {
-			if err = inheritBaseService(cid, sc, model.USE_MYSQL_DB()); err != nil {
-				log.Errorf("[ProductInfo] inheritBaseService warn: %+v", err)
-			}
-			if err = setSchemaFieldServiceAddr(cid, sc, model.USE_MYSQL_DB(), namespace); err != nil {
-				log.Errorf("[ProductInfo] setSchemaFieldServiceAddr err: %v", err)
-				return err
-			}
-			if err = handleUncheckedServices(sc, s.ID, cid, namespace); err != nil {
-				log.Errorf("[ProductInfo] handleUncheckedServices warn: %+v", err)
-			}
+		m := ProductInfoRes{}
+		m.Id = s.ID
+		m.ProductName = s.ProductName
+		m.ProductNameDisplay = s.ProductNameDisplay
+		m.ProductVersion = s.ProductVersion
+		if strings.Contains(s.ProductVersion, productVersionLike) {
+			vFound = true
 		}
-		if err = sc.ParseVariable(); err != nil {
-			log.Errorf("[ProductInfo] product info err: %v", err)
-			return err
-		}
-		err, userInfo := model.UserList.GetInfoByUserId(1)
-		if err != nil {
-			log.Errorf("GetInfoByUserId %v", err)
-			return err
-		}
-		reg := regexp.MustCompile(`(?i).*password.*`)
-		for _, serviceConfig := range sc.Service {
-			for key, configItem := range serviceConfig.Config {
-				if reg.Match([]byte(key)) {
-
-					defaultValue, err := aes.AesEncryptByPassword(fmt.Sprintf("%s", *(configItem.(schema.VisualConfig).Default.(*string))), userInfo.PassWord)
-
-					if err != nil {
-						return err
-					}
-					value, err := aes.AesEncryptByPassword(fmt.Sprintf("%s", *(configItem.(schema.VisualConfig).Value.(*string))), userInfo.PassWord)
-					if err != nil {
-						return err
-					}
-					serviceConfig.Config[key] = schema.VisualConfig{
-						Default: defaultValue,
-						Desc:    configItem.(schema.VisualConfig).Desc,
-						Type:    configItem.(schema.VisualConfig).Type,
-						Value:   value,
-					}
-				}
-			}
-		}
-
-		m := map[string]interface{}{}
-		m["id"] = s.ID
-		m["product_name"] = s.ProductName
-		m["product_name_display"] = s.ProductNameDisplay
-		m["product_version"] = s.ProductVersion
-		m["product"] = sc
+		//m["product"] = sc
 		if ProductListInfo[index].UserId > 0 {
 			if err, userInfo := model.UserList.GetInfoByUserId(ProductListInfo[index].UserId); err != nil {
-				m["username"] = ""
+				m.UserName = ""
 			} else {
-				m["username"] = userInfo.UserName
+				m.UserName = userInfo.UserName
 			}
 		} else {
-			m["username"] = ""
+			m.UserName = ""
 		}
 		// 根据已安装的产品包id，获取该产品包对应的详细信息
 		installed, err := model.DeployClusterProductRel.GetProductByPid(s.ID)
-		if len(installed) > 0 {
-			m["is_current_version"] = 1
+		if err == nil && len(installed) > 0 {
+			m.IsCurrentVersion = 1
+		} else {
+			suInstalled, err := model.DeployClusterSmoothUpgradeProductRel.GetProductByPid(s.ID)
+			if err == nil && len(suInstalled) > 0 {
+				m.IsCurrentVersion = 1
+			}
 		}
-		m["status"] = ProductListInfo[index].Status
-		m["namespace"] = ProductListInfo[index].Namespace
-		m["deploy_uuid"] = ProductListInfo[index].DeployUUID
-		m["product_type"] = s.ProductType
+		m.Status = s.Status
+		if len(deployStatus) == 0 {
+			sFound = true
+		}
+		for _, status := range deployStatus {
+			if status == s.Status {
+				sFound = true
+				break
+			}
+		}
+		m.NameSpace = s.Namespace
+		m.DeployUUID = s.DeployUUID
+		m.ProductType = s.ProductType
 		//kubernetes type not surpport upgrade
 		if cid > 0 {
-			m["can_upgrade"] = checkCanUpgrade(sc)
-			m["can_rollback"] = CanRollback(cid, s.ProductName, s.ProductVersion)
+			m.CanUpgrade = checkCanUpgrade(sc)
+			m.CanRollback = CanRollback(cid, s.ProductName, s.ProductVersion)
+			if _, ok := smoothUpgradeMap[s.ProductName]; ok {
+				m.CanSmoothUpgrade = true
+				info, err := model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterIdNamespace(s.ProductName, cid, namespace)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("smooth Upgrade ProductInfo query error %s", err)
+				}
+				if err == nil {
+					var smoothUpgradeInfo SmoothUpgradeInfoRes
+					smoothUpgradeInfo.IsCurrentVersion = 1
+					smoothUpgradeInfo.Id = info.ID
+					smoothUpgradeInfo.ProductName = info.ProductName
+					smoothUpgradeInfo.ProductNameDisplay = info.ProductNameDisplay
+					smoothUpgradeInfo.ProductVersion = info.ProductVersion
+					if strings.Contains(info.ProductVersion, productVersionLike) {
+						vFound = true
+					}
+					smoothUpgradeInfo.Status = info.Status
+					for _, status := range deployStatus {
+						if status == info.Status {
+							sFound = true
+							break
+						}
+					}
+					smoothUpgradeInfo.NameSpace = info.Namespace
+					smoothUpgradeInfo.DeployUUID = info.DeployUUID
+					smoothUpgradeInfo.ProductType = info.ProductType
+					if info.Status == model.PRODUCT_STATUS_DEPLOYED || info.Status == model.PRODUCT_STATUS_DEPLOY_FAIL {
+						smoothUpgradeInfo.CanRollback = true
+					}
+					if info.Status == model.PRODUCT_STATUS_DEPLOYING || info.Status == model.PRODUCT_STATUS_DEPLOY_FAIL {
+						m.CanUpgrade = false
+					}
+					if m.Status == model.PRODUCT_STATUS_DEPLOYING {
+						smoothUpgradeInfo.CanRollback = false
+					}
+					if info.DeployTime.Valid == true {
+						smoothUpgradeInfo.DeployTime = info.DeployTime.Time.Format(base.TsLayout)
+					} else {
+						smoothUpgradeInfo.DeployTime = ""
+					}
+					if info.CreateTime.Valid == true {
+						smoothUpgradeInfo.CreateTime = info.CreateTime.Time.Format(base.TsLayout)
+					} else {
+						smoothUpgradeInfo.CreateTime = ""
+					}
+					m.SmoothUpgradeProduct = &smoothUpgradeInfo
+				}
+				m.UpgradeService = smoothUpgradeMap[s.ProductName]
+			} else {
+				m.CanSmoothUpgrade = false
+			}
 		}
-		if ProductListInfo[index].DeployTime.Valid == true {
-			m["deploy_time"] = ProductListInfo[index].DeployTime.Time.Format(base.TsLayout)
+		if s.DeployTime.Valid == true {
+			m.DeployTime = s.DeployTime.Time.Format(base.TsLayout)
 		} else {
-			m["deploy_time"] = ""
+			m.DeployTime = ""
 		}
 
 		if s.CreateTime.Valid == true {
-			m["create_time"] = s.CreateTime.Time.Format(base.TsLayout)
+			m.CreateTime = s.CreateTime.Time.Format(base.TsLayout)
 		} else {
-			m["create_time"] = ""
+			m.CreateTime = ""
 		}
 		// 当产品包的部署状态变为undeploying或deploying状态时重写can_upgrade属性
-		if ProductListInfo[index].Status == model.PRODUCT_STATUS_UNDEPLOYING || ProductListInfo[index].Status == model.PRODUCT_STATUS_DEPLOYING {
-			m["can_upgrade"] = false
-			m["can_rollback"] = false
+		if s.Status == model.PRODUCT_STATUS_UNDEPLOYING || s.Status == model.PRODUCT_STATUS_DEPLOYING {
+			m.CanUpgrade = false
+			m.CanRollback = false
 		}
-		list = append(list, m)
+		if vFound && sFound {
+			resultList = append(resultList, m)
+		}
 	}
+
+	pagination := apibase.GetPaginationFromQueryParameters(nil, ctx, nil)
+	switch pagination.SortBy {
+	case "product_version":
+		sort.SliceStable(resultList, func(i, j int) bool {
+			if pagination.SortDesc {
+				return resultList[i].ProductVersion > resultList[j].ProductVersion
+			} else {
+				return resultList[i].ProductVersion < resultList[j].ProductVersion
+			}
+		})
+	case "deploy_time":
+		sort.SliceStable(resultList, func(i, j int) bool {
+			if pagination.SortDesc {
+				return resultList[i].DeployTime > resultList[j].DeployTime
+			} else {
+				return resultList[i].DeployTime < resultList[j].DeployTime
+			}
+		})
+	case "create_time":
+		sort.SliceStable(resultList, func(i, j int) bool {
+			if pagination.SortDesc {
+				return resultList[i].CreateTime > resultList[j].CreateTime
+			} else {
+				return resultList[i].CreateTime < resultList[j].CreateTime
+			}
+		})
+	default:
+		// 默认以服务名排序
+		sort.SliceStable(resultList, func(i, j int) bool {
+			return strings.Compare(resultList[i].ProductName, resultList[j].ProductName) == -1
+		})
+	}
+	// 重写分页
+	total := len(resultList) // result总数量
+	if pagination.Start > 0 {
+		if pagination.Start+pagination.Limit < total {
+			resultList = resultList[pagination.Start : pagination.Start+pagination.Limit]
+		} else if pagination.Start > total {
+			resultList = nil
+		} else {
+			resultList = resultList[pagination.Start:total]
+		}
+	} else {
+		if pagination.Limit == 0 {
+			resultList = resultList[:total]
+		} else if pagination.Limit < total {
+			resultList = resultList[:pagination.Limit]
+		}
+	}
+
 	return map[string]interface{}{
-		"list":  list,
-		"count": count,
+		"list":  resultList,
+		"count": total,
 	}
 }
 
@@ -2100,6 +2019,14 @@ func Service(ctx context.Context) apibase.Result {
 	}
 	paramErrs.CheckAndThrowApiParameterErrors()
 
+	type serviceRes struct {
+		ServiceName        string `json:"serviceName"`
+		ServiceNameDisplay string `json:"serviceNameDisplay"`
+		ServiceVersion     string `json:"serviceVersion"`
+		BaseProduct        string `json:"baseProduct"`
+		baseService        string `json:"baseService"`
+	}
+
 	clusterinfo, err := model.DeployClusterList.GetClusterInfoById(clusterId)
 	if err != nil {
 		log.Errorf("[Product->Service] Get cluster info error:%v", err)
@@ -2128,20 +2055,24 @@ func Service(ctx context.Context) apibase.Result {
 		}
 	}
 
-	services := []map[string]string{}
+	services := make([]serviceRes, 0)
 	for name, svc := range sc.Service {
 		serviceDisplay := svc.ServiceDisplay
 		if serviceDisplay == "" {
 			serviceDisplay = name
 		}
-		services = append(services, map[string]string{
-			"serviceName":        name,
-			"serviceNameDisplay": serviceDisplay,
-			"serviceVersion":     svc.Version,
-			"baseProduct":        svc.BaseProduct,
-			"baseService":        svc.BaseService,
+		services = append(services, serviceRes{
+			ServiceName:        name,
+			ServiceNameDisplay: serviceDisplay,
+			ServiceVersion:     svc.Version,
+			BaseProduct:        svc.BaseProduct,
+			baseService:        svc.BaseService,
 		})
 	}
+	// 默认以服务名排序
+	sort.SliceStable(services, func(i, j int) bool {
+		return strings.Compare(services[i].ServiceName, services[j].ServiceName) == -1
+	})
 
 	return services
 }
@@ -2168,6 +2099,7 @@ func ServiceGroup(ctx context.Context) apibase.Result {
 		log.Errorf("%v", err)
 		return err
 	}
+	upgradeMode := ctx.URLParam("upgrade_mode")
 	paramErrs.CheckAndThrowApiParameterErrors()
 	// 获取正在部署的产品包信息
 	info, err := model.DeployProductList.GetByProductNameAndVersion(productName, productVersion)
@@ -2276,9 +2208,16 @@ func ServiceGroup(ctx context.Context) apibase.Result {
 		return err
 	}
 	//添加select unselect  信息
-	if err = WithIpRoleInfo(clusterId, sc); err != nil {
-		log.Debugf("[Product->ServiceGroup] WithIpRoleInfo err: %v", err)
-		return err
+	if upgradeMode == upgrade.SMOOTH_UPGRADE_MODE {
+		if err = SmoothUpgradeWithIpRoleInfo(clusterId, info, sc); err != nil {
+			log.Debugf("[Product->ServiceGroup] SmoothUpgradeWithIpRoleInfo err: %v", err)
+			return err
+		}
+	} else {
+		if err = WithIpRoleInfo(clusterId, sc); err != nil {
+			log.Debugf("[Product->ServiceGroup] WithIpRoleInfo err: %v", err)
+			return err
+		}
 	}
 	res := sc.Group(uncheckedServices)
 	for _, group := range res {
@@ -2341,6 +2280,56 @@ func ServiceGroup(ctx context.Context) apibase.Result {
 		}
 	}
 	return res
+}
+
+func CompareIpList(a, b []string) bool {
+	sort.Sort(sort.StringSlice(a))
+	sort.Sort(sort.StringSlice(b))
+	if len(a) != len(b) {
+		return false
+	}
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func CheckMysqlAddr(ctx context.Context) apibase.Result {
+	productName := ctx.Params().Get("product_name")
+	if productName == "" {
+		log.Errorf("CheckMysqlAddr-product_name is empty")
+		return fmt.Errorf("product_name为空")
+	}
+	param := struct {
+		ClusterId    int    `json:"cluster_id"`
+		FinalUpgrade bool   `json:"final_upgrade"`
+		Ip           string `json:"ip"`
+	}{}
+	if err := ctx.ReadJSON(&param); err != nil {
+		log.Errorf("CheckMysqlAddr-parse param error: %v", err)
+		return err
+	}
+
+	mysqlIPList, err := model.DeployMysqlIpList.GetMysqlIpList(param.ClusterId, productName)
+	if err != nil {
+		log.Errorf("get mysql ip list error:%v", err)
+		return err
+	}
+	//平滑升级中提示修改数据库地址
+	if !param.FinalUpgrade && CompareIpList(mysqlIPList, strings.Split(param.Ip, ",")) {
+		return fmt.Sprintf("请更换 IP 地址")
+	}
+	//最终一次平滑升级提示修改数据库地址
+	if param.FinalUpgrade && !CompareIpList(mysqlIPList, strings.Split(param.Ip, ",")) {
+		return fmt.Sprintf("请更换 IP 地址为: %v", strings.Join(mysqlIPList, ","))
+	}
+
+	return ""
 }
 
 func loadKeyWithFile(filePath string) []string {
@@ -2578,19 +2567,16 @@ func ServiceFile(ctx context.Context) apibase.Result {
 }
 
 type serviceUpdateParam struct {
-	FieldPath string `json:"field_path"`
-	Field     string `json:"field"`
+	ProductVersion string `json:"product_version"`
+	FieldPath      string `json:"field_path"`
+	Field          string `json:"field"`
 }
 
 func ServiceUpdate(ctx context.Context) apibase.Result {
 	paramErrs := apibase.NewApiParameterErrors()
 	productName := ctx.Params().Get("product_name")
-	productVersion := ctx.Params().Get("product_version")
 	if productName == "" {
 		paramErrs.AppendError("$", fmt.Errorf("product_name is empty"))
-	}
-	if productVersion == "" {
-		paramErrs.AppendError("$", fmt.Errorf("product_version is empty"))
 	}
 	clusterId, err := GetCurrentClusterId(ctx)
 	if err != nil {
@@ -2599,55 +2585,59 @@ func ServiceUpdate(ctx context.Context) apibase.Result {
 	}
 	paramErrs.CheckAndThrowApiParameterErrors()
 
-	param := serviceUpdateParam{}
-	if err := ctx.ReadJSON(&param); err != nil {
+	params := make([]serviceUpdateParam, 0)
+	if err := ctx.ReadJSON(&params); err != nil {
 		return fmt.Errorf("ReadJSON err: %v", err)
 	}
 
-	info, err := model.DeployProductList.GetByProductNameAndVersion(productName, productVersion)
-	if err != nil {
-		log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
-		return err
-	}
-
-	sc, err := schema.Unmarshal(info.Product)
-	if err != nil {
-		log.Errorf("[Product->ServiceGroup] Unmarshal err: %v", err)
-		return err
-	}
-	for name, _ := range sc.Service {
-
-		_, err := sc.SetField(name+"."+param.FieldPath, param.Field)
-		if err != nil {
-			log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
-			continue
+	for _, param := range params {
+		if param.ProductVersion == "" {
+			return fmt.Errorf("product_version is empty")
 		}
-		err = serviceUpdateDeployModifySchema(productName, name, param.FieldPath, param.Field, clusterId)
+		info, err := model.DeployProductList.GetByProductNameAndVersion(productName, param.ProductVersion)
 		if err != nil {
 			log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
 			return err
 		}
-
-		clusterInfo, err := model.DeployClusterList.GetClusterInfoById(clusterId)
+		sc, err := schema.Unmarshal(info.Product)
 		if err != nil {
-			log.Errorf("%v\n", err)
-			continue
+			log.Errorf("[Product->ServiceGroup] Unmarshal err: %v", err)
+			return err
 		}
-		if err := addSafetyAuditRecord(ctx, "集群运维", "服务参数修改", "集群名称："+clusterInfo.Name+", 组件名称："+productName+productVersion+
-			", 服务组："+sc.Service[name].Group+", 服务名称："+name+sc.Service[name].Version+", 运行参数："+param.FieldPath+param.Field); err != nil {
-			log.Errorf("failed to add safety audit record\n")
-		}
-	}
+		for name, _ := range sc.Service {
 
-	schema, err := json.Marshal(sc)
-	if err != nil {
-		log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
-		return err
-	}
-	query := "UPDATE " + model.DeployProductList.TableName + " SET `product`=? WHERE product_name=? AND product_version=? AND product!=?"
-	if _, err := model.DeployProductList.GetDB().Exec(query, schema, sc.ProductName, sc.ProductVersion, schema); err != nil {
-		log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
-		return err
+			_, err := sc.SetField(name+"."+param.FieldPath, param.Field)
+			if err != nil {
+				log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
+				continue
+			}
+			err = serviceUpdateDeployModifySchema(productName, name, param.FieldPath, param.Field, clusterId)
+			if err != nil {
+				log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
+				return err
+			}
+
+			clusterInfo, err := model.DeployClusterList.GetClusterInfoById(clusterId)
+			if err != nil {
+				log.Errorf("%v\n", err)
+				continue
+			}
+			if err := addSafetyAuditRecord(ctx, "集群运维", "服务参数修改", "集群名称："+clusterInfo.Name+", 组件名称："+productName+param.ProductVersion+
+				", 服务组："+sc.Service[name].Group+", 服务名称："+name+sc.Service[name].Version+", 运行参数："+param.FieldPath+param.Field); err != nil {
+				log.Errorf("failed to add safety audit record\n")
+			}
+		}
+
+		schema, err := json.Marshal(sc)
+		if err != nil {
+			log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
+			return err
+		}
+		query := "UPDATE " + model.DeployProductList.TableName + " SET `product`=? WHERE product_name=? AND product_version=? AND product!=?"
+		if _, err := model.DeployProductList.GetDB().Exec(query, schema, sc.ProductName, sc.ProductVersion, schema); err != nil {
+			log.Errorf("[Product->ServiceUpdate] read service file err:%v", err)
+			return err
+		}
 	}
 	return nil
 }
@@ -3335,6 +3325,7 @@ type rollingUpdate struct {
 	clusterId         int
 	installMode       int
 	uncheckedServices []string
+	finalUpgrade      bool
 
 	ctx       sysContext.Context
 	rateLimit chan struct{}
@@ -3359,7 +3350,7 @@ type rollingUninstall struct {
 	sync.WaitGroup
 }
 
-func newRollingUpdate(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, ctx sysContext.Context, uncheckedServices []string, clusterId int, installMode int, operationId string) *rollingUpdate {
+func newRollingUpdate(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, ctx sysContext.Context, uncheckedServices []string, clusterId int, installMode int, operationId string, finalUpgrade bool) *rollingUpdate {
 	return &rollingUpdate{
 		schema:            sc,
 		svcMap:            make(map[string]*sync.Once, len(sc.Service)),
@@ -3371,6 +3362,7 @@ func newRollingUpdate(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, ct
 		ctx:               ctx,
 		rateLimit:         make(chan struct{}, rateLimit),
 		uncheckedServices: uncheckedServices,
+		finalUpgrade:      finalUpgrade,
 	}
 }
 
@@ -3898,43 +3890,125 @@ func rollingInstances(
 						continue
 					}
 				default:
-					instanceRecordInfo.ProductVersion = info.ProductVersion
-					instanceRecordInfo.ServiceVersion = info.ServiceVersion
-					instanceRecordInfo.Status = model.INSTANCE_STATUS_STOPPING
-					instanceRecordInfo.Progress = 0
-					rlt, err := model.DeployInstanceRecord.GetDB().NamedExec(insertQuery, &instanceRecordInfo)
-					if err != nil {
-						log.Errorf("%v", err)
-						oldInstancer.Clear()
-						return err
-					}
-					id, _ = rlt.LastInsertId()
+					log.Infof("--------------------->")
+					log.Infof("enter default")
+					if r.finalUpgrade {
+						log.Infof("is final upgrade")
+						if strings.HasSuffix(svcName, "Sql") || strings.HasSuffix(svcName, "sql") {
+							instanceRecordInfo.ProductVersion = info.ProductVersion
+							instanceRecordInfo.ServiceVersion = info.ServiceVersion
+							instanceRecordInfo.Status = model.INSTANCE_STATUS_UNINSTALLING
+							instanceRecordInfo.Progress = 0
+							rlt, err := model.DeployInstanceRecord.GetDB().NamedExec(insertQuery, &instanceRecordInfo)
+							if err != nil {
+								log.Errorf("%v", err)
+								oldInstancer.Clear()
+								return err
+							}
+							id, _ = rlt.LastInsertId()
 
-					if err := oldInstancer.Stop(); err != nil {
-						log.Errorf("%v", err)
-						oldInstancer.Clear()
-						return instanceErr{id, model.INSTANCE_STATUS_STOP_FAIL, 30, err}
-					}
-					oldInstancer.Clear()
+							if err := oldInstancer.UnInstall(false); err != nil {
+								log.Errorf("%v", err)
+								oldInstancer.Clear()
+								return instanceErr{id, model.INSTANCE_STATUS_UNINSTALL_FAIL, 80, err}
+							}
+							oldInstancer.Clear()
 
-					newInstancer, err = instance.NewInstancer(info.Pid, info.Ip, svcName, newSchema, r.operationId)
-					if err != nil {
-						log.Errorf("%v", err)
-						return err
-					}
-					if info.Pid != r.pid {
-						if err = newInstancer.SetPid(r.pid); err != nil {
+							if _, err := model.DeployInstanceRecord.GetDB().Exec(updateQuery, model.INSTANCE_STATUS_UNINSTALLED, "", 100, id); err != nil {
+								log.Errorf("%v", err)
+							}
+
+							if !r.acquireForLimit() {
+								err := errors.New(model.INSTANCE_STATUS_INSTALLING_CANCELLED)
+								log.Errorf("%v", err)
+								return err
+							}
+
+							newInstancer, err = instance.NewInstancer(info.Pid, info.Ip, svcName, newSchema, r.operationId)
+							if err != nil {
+								log.Errorf("%v", err)
+								r.releaseForLimit()
+								return err
+							}
+
+							instanceRecordInfo.InstanceId = newInstancer.ID()
+							instanceRecordInfo.ProductVersion = newSchema.ProductVersion
+							instanceRecordInfo.ServiceVersion = newSchema.Service[svcName].Version
+							instanceRecordInfo.Status = model.INSTANCE_STATUS_INSTALLING
+							instanceRecordInfo.Progress = 0
+							rlt, err = model.DeployInstanceRecord.GetDB().NamedExec(insertQuery, &instanceRecordInfo)
+							if err != nil {
+								log.Errorf("%v", err)
+								newInstancer.Clear()
+								r.releaseForLimit()
+								return err
+							}
+							id, _ = rlt.LastInsertId()
+							newInstancer.SetMode(r.installMode)
+							if err := newInstancer.Install(false); err != nil {
+								log.Errorf("%v", err)
+								newInstancer.Clear()
+								r.releaseForLimit()
+								return instanceErr{id, model.INSTANCE_STATUS_INSTALL_FAIL, 30, err}
+							}
+
+							r.releaseForLimit()
+
+							if _, err := model.DeployInstanceRecord.GetDB().Exec(updateQuery, model.INSTANCE_STATUS_INSTALLED, "", 30, id); err != nil {
+								log.Errorf("%v", err)
+							}
+							if newSchema.Service[svcName].Instance.StartAfterInstall {
+								newInstancer.Clear()
+								continue
+							}
+						} else {
+							continue
+						}
+					} else {
+						log.Infof("-------------------------->")
+						log.Infof("restart service")
+						if r.installMode == 3 {
+							log.Infof("skip restart service because of smooth upgrade.")
+							continue
+						}
+						instanceRecordInfo.ProductVersion = info.ProductVersion
+						instanceRecordInfo.ServiceVersion = info.ServiceVersion
+						instanceRecordInfo.Status = model.INSTANCE_STATUS_STOPPING
+						instanceRecordInfo.Progress = 0
+						rlt, err := model.DeployInstanceRecord.GetDB().NamedExec(insertQuery, &instanceRecordInfo)
+						if err != nil {
+							log.Errorf("%v", err)
+							oldInstancer.Clear()
+							return err
+						}
+						id, _ = rlt.LastInsertId()
+
+						if err := oldInstancer.Stop(); err != nil {
+							log.Errorf("%v", err)
+							oldInstancer.Clear()
+							return instanceErr{id, model.INSTANCE_STATUS_STOP_FAIL, 30, err}
+						}
+						oldInstancer.Clear()
+
+						newInstancer, err = instance.NewInstancer(info.Pid, info.Ip, svcName, newSchema, r.operationId)
+						if err != nil {
+							log.Errorf("%v", err)
+							return err
+						}
+						if info.Pid != r.pid {
+							if err = newInstancer.SetPid(r.pid); err != nil {
+								log.Errorf("%v", err)
+							}
+						}
+						updateRecord := "UPDATE " + model.DeployInstanceRecord.TableName + " SET `status`=?, product_version=?, update_time=NOW() WHERE id=?"
+						if _, err := model.DeployInstanceRecord.GetDB().Exec(updateRecord, model.INSTANCE_STATUS_STOPPED, newSchema.ProductVersion, id); err != nil {
 							log.Errorf("%v", err)
 						}
-					}
-					updateRecord := "UPDATE " + model.DeployInstanceRecord.TableName + " SET `status`=?, product_version=?, update_time=NOW() WHERE id=?"
-					if _, err := model.DeployInstanceRecord.GetDB().Exec(updateRecord, model.INSTANCE_STATUS_STOPPED, newSchema.ProductVersion, id); err != nil {
-						log.Errorf("%v", err)
-					}
-					if err := newInstancer.UpdateConfig(); err != nil {
-						log.Errorf("%v", err)
-						newInstancer.Clear()
-						return instanceErr{id, model.INSTANCE_STATUS_UPDATE_CONFIG_FAIL, 50, err}
+						if err := newInstancer.UpdateConfig(); err != nil {
+							log.Errorf("%v", err)
+							newInstancer.Clear()
+							return instanceErr{id, model.INSTANCE_STATUS_UPDATE_CONFIG_FAIL, 50, err}
+						}
 					}
 				}
 
@@ -4276,8 +4350,8 @@ func (r *rollingUpdate) rollingUpdateCore(svcName string) error {
 		log.Errorf("%v", err)
 		return err
 	}
-
-	if r.schema.Service[svcName].Instance.UpdateRecreate {
+	//非平滑升级，卸载原服务
+	if r.installMode != 3 && r.schema.Service[svcName].Instance.UpdateRecreate {
 		if err := uninstallInstances(r.clusterId, oldInstance, r.deployUUID, r.operationId); err != nil {
 			return err
 		}
@@ -4455,7 +4529,7 @@ func (r *rollingUpdate) run() error {
 	return r.getError()
 }
 
-func deploy(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, ctx sysContext.Context, uncheckedServices []string, clusterId int, installMode int, operationId string) {
+func deploy(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, ctx sysContext.Context, uncheckedServices []string, clusterId int, installMode int, operationId, sourceVersion string, finalUpgrade bool) {
 	var err error
 	var query string
 
@@ -4475,12 +4549,75 @@ func deploy(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, ctx sysConte
 			log.Errorf("%v", err)
 			status = model.PRODUCT_STATUS_DEPLOY_FAIL
 		}
-
-		query = "UPDATE " + model.DeployClusterProductRel.TableName + " SET status=?, product_parsed=?, update_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
-		if _, err := model.DeployClusterProductRel.GetDB().Exec(query, status, productParsed, pid, clusterId); err != nil {
+		sourceProduct, err := model.DeployProductList.GetByProductNameAndVersion(sc.ProductName, sourceVersion)
+		if err != nil {
 			log.Errorf("%v", err)
 		}
-
+		switch installMode {
+		case 3:
+			query = "UPDATE " + model.DeployClusterSmoothUpgradeProductRel.TableName + " SET status=?, product_parsed=?, update_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
+			if _, err := model.DeployClusterSmoothUpgradeProductRel.GetDB().Exec(query, status, productParsed, pid, clusterId); err != nil {
+				log.Errorf("%v", err)
+			}
+			instances, err := model.DeployInstanceList.GetInstanceListByClusterId(clusterId, sourceProduct.ID)
+			if err != nil {
+				log.Errorf("%v", err)
+			}
+			if len(instances) == 0 {
+				suRel, err := model.DeployClusterSmoothUpgradeProductRel.GetSmoothUpgradeProductRelByClusterIdAndPid(clusterId, pid)
+				if err != nil {
+					log.Errorf("%v", err)
+				}
+				query = "UPDATE " + model.DeployClusterProductRel.TableName + " SET pid=?, deploy_uuid=?, `product_parsed`=?, `status`=?, `user_id`=?, deploy_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
+				if _, err := model.DeployClusterProductRel.Exec(query, suRel.Pid, suRel.DeployUUID, suRel.ProductParsed, suRel.Status, suRel.UserId, sourceProduct.ID, clusterId); err != nil {
+					log.Errorf("%v", err)
+				}
+				query = "UPDATE " + model.DeployClusterSmoothUpgradeProductRel.TableName + " SET is_deleted=1, update_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
+				if _, err := model.DeployClusterProductRel.GetDB().Exec(query, pid, clusterId); err != nil {
+					log.Errorf("%v", err)
+				}
+				query = "UPDATE " + upgrade.UpgradeHistory.TableName + " SET upgrade_mode=? WHERE cluster_id=? AND product_name=? AND source_version=? AND upgrade_mode=? AND is_deleted=0"
+				if _, err := model.DeployClusterProductRel.GetDB().Exec(query, "", clusterId, sourceProduct.ProductName, sourceProduct.ProductVersion, upgrade.SMOOTH_UPGRADE_MODE); err != nil {
+					log.Errorf("%v", err)
+				}
+				if err := model.DeployMysqlIpList.Delete("", sourceProduct.ProductName, clusterId); err != nil {
+					log.Errorf("%v", err)
+				}
+			}
+		case 2:
+			query = "UPDATE " + model.DeployClusterProductRel.TableName + " SET status=?, product_parsed=?, update_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
+			if _, err := model.DeployClusterProductRel.GetDB().Exec(query, status, productParsed, pid, clusterId); err != nil {
+				log.Errorf("%v", err)
+			}
+			query = "UPDATE " + model.DeployClusterSmoothUpgradeProductRel.TableName + " SET is_deleted=1, update_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
+			if _, err := model.DeployClusterProductRel.GetDB().Exec(query, sourceProduct.ID, clusterId); err != nil {
+				log.Errorf("%v", err)
+			}
+			query = "UPDATE " + upgrade.UpgradeHistory.TableName + " SET upgrade_mode=? WHERE cluster_id=? AND product_name=? AND target_version=? AND upgrade_mode=? AND is_deleted=0"
+			if _, err := model.DeployClusterProductRel.GetDB().Exec(query, "", clusterId, sourceProduct.ProductName, sourceProduct.ProductVersion, upgrade.SMOOTH_UPGRADE_MODE); err != nil {
+				log.Errorf("%v", err)
+			}
+			if err := model.DeployMysqlIpList.Delete("", sourceProduct.ProductName, clusterId); err != nil {
+				log.Errorf("%v", err)
+			}
+		default:
+			query = "UPDATE " + model.DeployClusterProductRel.TableName + " SET status=?, product_parsed=?, update_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
+			if _, err := model.DeployClusterProductRel.GetDB().Exec(query, status, productParsed, pid, clusterId); err != nil {
+				log.Errorf("%v", err)
+			}
+			productInfo, err := model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterId(sc.ProductName, clusterId)
+			if err != nil {
+				log.Errorf("%v", err)
+			}
+			query = "UPDATE " + model.DeployClusterSmoothUpgradeProductRel.TableName + " SET is_deleted=1, update_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
+			if _, err := model.DeployClusterProductRel.GetDB().Exec(query, productInfo.ID, clusterId); err != nil {
+				log.Errorf("%v", err)
+			}
+			query = "UPDATE " + upgrade.UpgradeHistory.TableName + " SET upgrade_mode=? WHERE cluster_id=? AND product_name=? AND upgrade_mode=? AND is_deleted=0"
+			if _, err := model.DeployClusterProductRel.GetDB().Exec(query, "", clusterId, sc.ProductName, upgrade.SMOOTH_UPGRADE_MODE); err != nil {
+				log.Errorf("%v", err)
+			}
+		}
 		query = "UPDATE " + model.DeployProductHistory.TableName + " SET `status`=?, deploy_end_time=NOW() WHERE deploy_uuid=? AND cluster_id=?"
 		if _, err := model.DeployProductHistory.GetDB().Exec(query, status, deployUUID, clusterId); err != nil {
 			log.Errorf("%v", err)
@@ -4493,7 +4630,7 @@ func deploy(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, ctx sysConte
 
 	log.Infof("cluster %v installing new instance and rolling update ...", clusterId)
 
-	if err = newRollingUpdate(sc, deployUUID, pid, ctx, uncheckedServices, clusterId, installMode, operationId).run(); err != nil {
+	if err = newRollingUpdate(sc, deployUUID, pid, ctx, uncheckedServices, clusterId, installMode, operationId, finalUpgrade).run(); err != nil {
 		log.Errorf("%v update error: %v", deployUUID, err)
 		return
 	}
@@ -4549,36 +4686,38 @@ func deploy(sc *schema.SchemaConfig, deployUUID uuid.UUID, pid int, ctx sysConte
 			}
 		}
 	}
-
-	var oldInstance []model.InstanceAndProductInfo
-	for _, info := range instanceInfo {
-		var bReserve bool
-		if srvConfig, exist := sc.Service[info.ServiceName]; info.ProductVersion == sc.ProductVersion && exist {
-			if srvConfig.Instance != nil && !srvConfig.Instance.UseCloud && !util.StringContain(uncheckedServices, info.ServiceName) {
-				for _, ipInfo := range serviceIpInfo {
-					// strictly match ip
-					isIncludeIp := false
-					for _, v := range strings.Split(ipInfo.IpList, ",") {
-						if v == info.Ip {
-							isIncludeIp = true
+	//非平滑升级，卸载原服务
+	if installMode != 3 {
+		var oldInstance []model.InstanceAndProductInfo
+		for _, info := range instanceInfo {
+			var bReserve bool
+			if srvConfig, exist := sc.Service[info.ServiceName]; info.ProductVersion == sc.ProductVersion && exist {
+				if srvConfig.Instance != nil && !srvConfig.Instance.UseCloud && !util.StringContain(uncheckedServices, info.ServiceName) {
+					for _, ipInfo := range serviceIpInfo {
+						// strictly match ip
+						isIncludeIp := false
+						for _, v := range strings.Split(ipInfo.IpList, ",") {
+							if v == info.Ip {
+								isIncludeIp = true
+								break
+							}
+						}
+						if ipInfo.ServiceName == info.ServiceName && isIncludeIp {
+							log.Debugf("instance reserve (ProductName:%v, ProductVersion:%v, ServiceName: %v, Ip: %v)",
+								sc.ProductName, info.ProductVersion, info.ServiceName, info.Ip)
+							bReserve = true
 							break
 						}
 					}
-					if ipInfo.ServiceName == info.ServiceName && isIncludeIp {
-						log.Debugf("instance reserve (ProductName:%v, ProductVersion:%v, ServiceName: %v, Ip: %v)",
-							sc.ProductName, info.ProductVersion, info.ServiceName, info.Ip)
-						bReserve = true
-						break
-					}
 				}
 			}
+			if !bReserve {
+				oldInstance = append(oldInstance, info)
+			}
 		}
-		if !bReserve {
-			oldInstance = append(oldInstance, info)
+		if err = uninstallInstances(clusterId, oldInstance, deployUUID, operationId); err != nil {
+			return
 		}
-	}
-	if err = uninstallInstances(clusterId, oldInstance, deployUUID, operationId); err != nil {
-		return
 	}
 
 	log.Infof("deploy %v(%v) success", sc.ProductName, sc.ProductVersion)
@@ -5041,6 +5180,8 @@ type deployParam struct {
 	Namespace         string   `json:"namespace,omitempty"`
 	RelyNamespace     string   `json:"relyNamespace,omitempty"`
 	DeployMode        int      `json:"deployMode,omitempty"`
+	SourceVersion     string   `json:"source_version,omitempty"`
+	FinalUpgrade      bool     `json:"final_upgrade"`
 }
 
 type unDeployParam struct {
@@ -5069,6 +5210,11 @@ func Deploy(ctx context.Context) apibase.Result {
 			return err
 		}
 	}
+	if param.DeployMode == 3 {
+		if err := checkSmoothUpgradeServiceAddr(param.ClusterId, productName, productVersion, param.FinalUpgrade); err != nil {
+			return err
+		}
+	}
 	log.Infof("deploy product_name:%v, product_version: %v, userId: %v, clusterId: %v", productName, productVersion, userId, param.ClusterId)
 	cluster, err := model.DeployClusterList.GetClusterInfoById(param.ClusterId)
 	if err != nil {
@@ -5085,11 +5231,45 @@ func Deploy(ctx context.Context) apibase.Result {
 	if cluster.Type == model.DEPLOY_CLUSTER_TYPE_KUBERNETES {
 		return DealK8SDeploy(param.Namespace, param.UncheckedServices, userId, param.ClusterId, param.RelyNamespace, param.Pid)
 	} else {
-		return DealDeploy(productName, productVersion, param.UncheckedServices, userId, param.ClusterId, param.DeployMode)
+		return DealDeploy(productName, productVersion, param.SourceVersion, param.UncheckedServices, userId, param.ClusterId, param.DeployMode, param.FinalUpgrade)
 	}
 }
 
-func DealDeploy(productName, productVersion string, uncheckedServices []string, userId, clusterId int, installMode int) (rlt interface{}) {
+func DeployForDevOps(ctx context.Context) apibase.Result {
+	productName := ctx.Params().Get("product_name")
+	productVersion := ctx.Params().Get("product_version")
+	if productName == "" || productVersion == "" {
+		return fmt.Errorf("product_name or product_version is empty")
+	}
+	userId := 1
+	param := deployParam{}
+	if err := ctx.ReadJSON(&param); err != nil {
+		return fmt.Errorf("ReadJSON err: %v", err)
+	}
+	if param.ClusterId == 0 {
+		return fmt.Errorf("clusterId empty")
+	}
+	log.Infof("deploy product_name:%v, product_version: %v, userId: %v, clusterId: %v", productName, productVersion, userId, param.ClusterId)
+	cluster, err := model.DeployClusterList.GetClusterInfoById(param.ClusterId)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := addSafetyAuditRecord(ctx, "部署向导", "产品部署", "集群名称："+cluster.Name+", 组件名称："+productName+productVersion); err != nil {
+			log.Errorf("failed to add safety audit record\n")
+		}
+		if err := model.NotifyEvent.DeleteNotifyEvent(cluster.Id, 0, productName, "", "", false); err != nil {
+			log.Errorf("delete notify event error: %v", err)
+		}
+	}()
+	if cluster.Type == model.DEPLOY_CLUSTER_TYPE_KUBERNETES {
+		return DealK8SDeploy(param.Namespace, param.UncheckedServices, userId, param.ClusterId, param.RelyNamespace, param.Pid)
+	} else {
+		return DealDeploy(productName, productVersion, "", param.UncheckedServices, userId, param.ClusterId, param.DeployMode, false)
+	}
+}
+
+func DealDeploy(productName, productVersion, sourceVersion string, uncheckedServices []string, userId, clusterId int, installMode int, finalUpgrade bool) (rlt interface{}) {
 	tx := model.USE_MYSQL_DB().MustBegin()
 	defer func() {
 		if _, ok := rlt.(error); ok {
@@ -5137,9 +5317,14 @@ func DealDeploy(productName, productVersion string, uncheckedServices []string, 
 		log.Errorf("%v", err)
 		return err
 	}
-	err = model.DeployClusterProductRel.CheckProductReadyForDeploy(productName)
-	if err != nil {
-		return err
+	if installMode == 3 {
+		if err = model.DeployClusterSmoothUpgradeProductRel.CheckProductReadyForDeploy(productName); err != nil {
+			return err
+		}
+	} else {
+		if err = model.DeployClusterProductRel.CheckProductReadyForDeploy(productName); err != nil {
+			return err
+		}
 	}
 
 	deployUUID := uuid.NewV4()
@@ -5152,10 +5337,20 @@ func DealDeploy(productName, productVersion string, uncheckedServices []string, 
 		DeployUUID:    deployUUID.String(),
 		UserId:        userId,
 	}
-	oldProductListInfo, err := model.DeployClusterProductRel.GetCurrentProductByProductNameClusterId(productName, clusterId)
+
+	var productRelTable string
+	var oldProductListInfo *model.DeployProductListInfo
+	var _err error
+	if installMode == 3 {
+		productRelTable = model.DeployClusterSmoothUpgradeProductRel.TableName
+		oldProductListInfo, _err = model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterId(productName, clusterId)
+	} else {
+		productRelTable = model.DeployClusterProductRel.TableName
+		oldProductListInfo, _err = model.DeployClusterProductRel.GetCurrentProductByProductNameClusterId(productName, clusterId)
+	}
 	//升级或者重新部署
-	if err == nil {
-		query = "UPDATE " + model.DeployClusterProductRel.TableName + " SET pid=?, user_id=?, `status`=?, `deploy_uuid`=?, deploy_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
+	if _err == nil {
+		query = "UPDATE " + productRelTable + " SET pid=?, user_id=?, `status`=?, `deploy_uuid`=?, deploy_time=NOW() WHERE pid=? AND clusterId=? AND is_deleted=0"
 		if _, err := tx.Exec(query, productListInfo.ID, userId, model.PRODUCT_STATUS_DEPLOYING, deployUUID, oldProductListInfo.ID, clusterId); err != nil {
 			log.Errorf("%v", err)
 			return err
@@ -5186,8 +5381,8 @@ func DealDeploy(productName, productVersion string, uncheckedServices []string, 
 		}
 
 		//	安装
-	} else if err == sql.ErrNoRows {
-		query = "INSERT INTO " + model.DeployClusterProductRel.TableName + " (namespace,product_parsed,pid, clusterId, deploy_uuid, user_id, deploy_time, status) VALUES" +
+	} else if _err == sql.ErrNoRows {
+		query = "INSERT INTO " + productRelTable + " (namespace,product_parsed,pid, clusterId, deploy_uuid, user_id, deploy_time, status) VALUES" +
 			" (:namespace,:product_parsed,:pid, :clusterId, :deploy_uuid, :user_id, NOW(), :status)"
 		if _, err = tx.NamedExec(query, &rel); err != nil {
 			log.Errorf("%v", err)
@@ -5264,7 +5459,7 @@ func DealDeploy(productName, productVersion string, uncheckedServices []string, 
 		log.Errorf("%v", err)
 		return nil
 	}
-	go deploy(sc, deployUUID, productListInfo.ID, ctx, uncheckedServices, clusterId, installMode, operationId)
+	go deploy(sc, deployUUID, productListInfo.ID, ctx, uncheckedServices, clusterId, installMode, operationId, sourceVersion, finalUpgrade)
 
 	return map[string]interface{}{"deploy_uuid": deployUUID}
 }
@@ -5566,9 +5761,22 @@ func Cancel(ctx context.Context) apibase.Result {
 	if productType == "" {
 		return fmt.Errorf("product_type is empty")
 	}
+	deployModeStr := ctx.FormValue("deploy_mode")
+	deployMode, err := strconv.Atoi(deployModeStr)
+	if err != nil {
+		return fmt.Errorf("deploy_mode is not number")
+	}
 	//pagination := apibase.GetPaginationFromQueryParameters(nil, ctx)
-	product, err := model.DeployClusterProductRel.GetCurrentProductByProductNameClusterId(productName, clusterId)
-	if err != nil || product.Status != model.PRODUCT_STATUS_DEPLOYING {
+	var _err error
+	var product = &model.DeployProductListInfo{}
+	if deployMode == 3 {
+		//平滑升级
+		product, _err = model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterId(productName, clusterId)
+	} else {
+		//非平滑升级
+		product, _err = model.DeployClusterProductRel.GetCurrentProductByProductNameClusterId(productName, clusterId)
+	}
+	if _err != nil || product.Status != model.PRODUCT_STATUS_DEPLOYING {
 		return errors.New("product is not deploying")
 	}
 	deployUUID, _ := uuid.FromString(product.DeployUUID)
@@ -6234,6 +6442,42 @@ func ModifySchemaField(ctx context.Context) (rlt apibase.Result) {
 // @Param           message body string true "[{"clusterId":"","field_path":"","field":"","namespace":""}]"
 // @Success         200 {string}  string "{"msg":"ok","code":0,"data":null}"
 // @Router          /api/v2/product/{product_name}/service/{service_name}/modify_schema_field_batch [post]
+func ModifySchemaFieldForDevOps(ctx context.Context) (rlt apibase.Result) {
+	info := model.SchemaFieldModifyInfo{
+		ProductName: ctx.Params().Get("product_name"),
+		ServiceName: ctx.Params().Get("service_name"),
+	}
+	if info.ProductName == "" || info.ServiceName == "" {
+		return fmt.Errorf("product_name or service_name is empty")
+	}
+
+	var reqParams struct {
+		ClusterId int    `json:"clusterId"`
+		FieldPath string `json:"field_path"`
+		Field     string `json:"field"`
+	}
+	err := ctx.ReadJSON(&reqParams)
+
+	if err != nil {
+		log.Errorf("%v", err)
+		return err
+	}
+	clusterId := reqParams.ClusterId
+
+	info.ClutserId = clusterId
+	info.FieldPath = reqParams.FieldPath
+	fp := strings.Split(info.FieldPath, ".")
+	if fp[0] != "Instance" && fp[0] != "Config" {
+		return fmt.Errorf("field_path format error")
+	}
+	info.Field = reqParams.Field
+
+	// 检测修改的配置是否之前配置过多个配置值，若存在，删除之前的记录
+	CheckMultiFieldConfig(clusterId, info.ProductName, info.ServiceName, info.FieldPath)
+
+	return CommonModifySchemaField(&info)
+}
+
 func ModifySchemaFieldBatch(ctx context.Context) (rlt apibase.Result) {
 	log.Debugf("[Product->ModifySchemaFieldBatch] ConfigAlterGroups from EasyMatrix API ")
 	info := model.SchemaFieldModifyInfo{
@@ -7744,18 +7988,43 @@ func GetUpgradeCandidateList(ctx context.Context) apibase.Result {
 	if productVersion == "" {
 		return fmt.Errorf("product version is null")
 	}
-	productType := ctx.Params().Get("product_type")
-	if productVersion == "" {
-		return fmt.Errorf("product type is null")
+	productType := ctx.URLParam("product_type")
+	upgradeMode := ctx.URLParam("upgrade_mode")
+	clusterId, err := GetCurrentClusterId(ctx)
+	if err != nil {
+		log.Errorf("%v", err)
+		return err
 	}
-
-	products, _ := model.DeployProductList.GetProductListByNameAndType(productName, productType, nil)
 
 	type resultList struct {
 		Id             int    `json:"id"`
 		ProductVersion string `json:"product_version"`
 	}
 	var availables []resultList
+
+	if upgradeMode == upgrade.SMOOTH_UPGRADE_MODE {
+		infoList, err := upgrade.UpgradeHistory.GetTargetVersionInfo(clusterId, productName, productVersion, productType, upgradeMode)
+		if err != nil {
+			log.Errorf("GetUpgradeCandidateList-query db error: %v", err)
+			return err
+		}
+		if len(infoList) == 0 {
+			goto SUBSEQUENCE
+		}
+		//存在平滑升级版本
+		for _, info := range infoList {
+			availables = append(availables, resultList{
+				info.ID,
+				info.ProductVersion,
+			})
+		}
+		return map[string]interface{}{
+			"list":  availables,
+			"count": len(availables),
+		}
+	}
+SUBSEQUENCE:
+	products, _ := model.DeployProductList.GetProductListByNameAndType(productName, productType, nil)
 	for _, p := range products {
 		if p.ProductType != 0 {
 			continue
@@ -8215,7 +8484,8 @@ func StartAutoTest(ctx context.Context) apibase.Result {
 			var err error
 			var reportUrl string
 			cmd := fmt.Sprintf("#!/bin/sh\n %s", testScript)
-			content, err := agent.AgentClient.ToExecCmdWithTimeout(svc.Sid, svc.AgentId, strings.TrimSpace(cmd), "20m", "", "")
+			timeOut := fmt.Sprintf("%dm", cache.SysConfig.GlobalConfig.AutoTestTimeoutLimit)
+			content, err := agent.AgentClient.ToExecCmdWithTimeout(svc.Sid, svc.AgentId, strings.TrimSpace(cmd), timeOut, "", "")
 			if err == nil {
 				reg := regexp.MustCompile(`reportUrl:https?://[-A-Za-z0-9+&@#/%?=~_|!:,.;]+[-A-Za-z0-9+&@#/%=~_|]`)
 				matches := reg.FindStringSubmatch(content)
@@ -8556,4 +8826,291 @@ func ServiceConfigDiff(ctx context.Context) apibase.Result {
 		"before": before,
 		"after":  after,
 	}
+}
+
+type ProductNameStruct struct {
+	ID          int                       `json:"id"`
+	Name        string                    `json:"product_name"`
+	Version     string                    `json:"product_version"`
+	Product     *ProductNameProductStruct `json:"product"`
+	ProductType int                       `json:"product_type"`
+}
+
+type ProductNameProductStruct struct {
+	ParentProductName string
+}
+
+func GetProductNameList(ctx context.Context) apibase.Result {
+	type res struct {
+		List []ProductNameStruct `json:"list"`
+	}
+	var result res
+	var deployProductNames []string
+	var deployStatus []string
+	parentProductName := ctx.URLParam("parentProductName")
+	if productNames := ctx.URLParam("productName"); productNames != "" {
+		deployProductNames = strings.Split(productNames, ",")
+	}
+	clusterId := ctx.URLParam("clusterId")
+	//namespace从cookie中获取，若mode不为空代表主机模式，将namespace置空
+	namespace := ctx.GetCookie(COOKIE_CURRENT_K8S_NAMESPACE)
+	// 在获取已部署应用列表的时候置空cookie中的namespace
+	mode := ctx.URLParam("mode")
+	if mode != "" {
+		namespace = ""
+	}
+	//若前端未传clusterId,从cookie中获取实际clusterId
+	var cid int
+	var err error
+	if clusterId == "" {
+		cid, err = GetCurrentClusterId(ctx)
+		if err != nil {
+			log.Errorf("[GetProductNameList] get cluster id from cookie error: %s", err)
+			//return fmt.Errorf("[ProductInfo] get cluster id from cookie error: %s", err)
+		}
+	} else {
+		cid, _ = strconv.Atoi(clusterId)
+	}
+	ProductListInfo := make([]model.DeployProductListInfoWithNamespace, 0)
+	// 集群id为0时表示，获取上传的产品包信息，非0表示获取指定集群下已部署过的产品包的信息
+	if cid == 0 {
+		// 安装包管理下的所有上传的产品包信息，同时根据前端检索条件进行检索
+		ProductListInfo, _ = model.DeployProductList.GetProductListInfo(parentProductName, "", "", "", "", cid, deployStatus, deployProductNames, namespace)
+	} else {
+		// 获取集群下所有部署的产品包信息，同时根据前端检索条件进行检索
+		ProductListInfo, err = model.DeployClusterProductRel.GetDeployClusterProductList(parentProductName, "", "", "", "", cid, deployStatus, deployProductNames, namespace)
+		if err != nil {
+			return fmt.Errorf("ProductInfo query error %s", err)
+		}
+	}
+
+	//listMap := make(map[string]bool, 0)
+
+	// 默认以服务名排序
+	sort.SliceStable(ProductListInfo, func(i, j int) bool {
+		return strings.Compare(ProductListInfo[i].ProductName, ProductListInfo[j].ProductName) == -1
+	})
+
+	for _, v := range ProductListInfo {
+		temp := ProductNameStruct{}
+		temp.ID = v.ID
+		temp.Name = v.ProductName
+		temp.Version = v.ProductVersion
+		sc, err := schema.Unmarshal(v.Product)
+		if err != nil {
+			log.Errorf("[GetProductNameList-ProductInfo] Unmarshal err: %v", err)
+		}
+		temp.Product = &ProductNameProductStruct{
+			ParentProductName: sc.ParentProductName,
+		}
+		temp.ProductType = v.ProductType
+		result.List = append(result.List, temp)
+
+	}
+
+	return result
+}
+
+func GetServiceConfig(ctx context.Context) apibase.Result {
+	log.Debugf("[Product->ServiceConfig] ServiceConfig from EasyMatrix API ")
+
+	// 获取入参以及判断入参是否为空
+	paramErrs := apibase.NewApiParameterErrors()
+	productName := ctx.URLParam("product_name")
+	pid, err := ctx.URLParamInt("pid")
+	if err != nil {
+		paramErrs.AppendError("$", fmt.Errorf("pid is not int"))
+	}
+	clusterId, err := ctx.URLParamInt("clusterId")
+	if err != nil {
+		paramErrs.AppendError("$", fmt.Errorf("clusterId is not int"))
+	}
+	configPath := ctx.URLParam("configPath")
+
+	if productName == "" {
+		paramErrs.AppendError("$", fmt.Errorf("product_name is empty"))
+	}
+	if configPath == "" {
+		paramErrs.AppendError("$", fmt.Errorf("configKey is empty"))
+	}
+	paramErrs.CheckAndThrowApiParameterErrors()
+
+	log.Infof("GetServiceConfig, product name %v, clusterId %v, configPath %v", productName, clusterId, configPath)
+
+	var info *model.DeployProductListInfo
+
+	info, err = model.DeployProductList.GetProductInfoById(pid)
+	if err != nil {
+		return fmt.Errorf("Database query error %v", err)
+	}
+	sc, err := schema.Unmarshal(info.Product)
+	if err != nil {
+		log.Errorf("Unmarshal err: %v", err)
+		return err
+	}
+	if err = inheritBaseService(clusterId, sc, model.USE_MYSQL_DB()); err != nil {
+		log.Errorf("inheritBaseService warn: %+v", err)
+	}
+	if err = setSchemaFieldServiceAddr(clusterId, sc, model.USE_MYSQL_DB(), ""); err != nil {
+		log.Errorf("setSchemaFieldServiceAddr err: %v", err)
+		return err
+	}
+	if err = handleUncheckedServices(sc, info.ID, clusterId, ""); err != nil {
+		log.Errorf("handleUncheckedServices warn: %+v", err)
+	}
+	if err = sc.ParseVariable(); err != nil {
+		log.Errorf("product info err: %v", err)
+		return err
+	}
+	//PublicService@Config.mysql_db
+	configGroup := strings.Split(configPath, "@")
+	if len(configGroup) < 2 {
+		log.Errorf("configKey format err: %v", configPath)
+		return fmt.Errorf("configKey format err: %v", configPath)
+	}
+	serviceName := configGroup[0]
+	serviceConfig := configGroup[1]
+	config := strings.Split(serviceConfig, ".")
+
+	if len(config) < 2 || config[0] != "Config" {
+		log.Errorf("configKey format err: %v", configPath)
+		return fmt.Errorf("configKey format err: %v", configPath)
+	}
+	configKey := strings.Join(config[1:], ".")
+	var configValue interface{}
+	var service schema.ServiceConfig
+	if _, ok := sc.Service[serviceName]; !ok {
+		log.Errorf("service  not exist: %v", configKey)
+		return fmt.Errorf("service  not exist: %v", configKey)
+	}
+	service = sc.Service[serviceName]
+	if _, ok := service.Config[configKey]; !ok {
+		log.Errorf("configKey not exist: %v", configKey)
+		return fmt.Errorf("configKey not exist: %v", configKey)
+	}
+	switch service.Config[configKey].(schema.VisualConfig).Default.(type) {
+	case *string:
+		configValue = service.Config[configKey].(schema.VisualConfig).Default.(*string)
+	case *schema.ServiceAddrStruct:
+		configValue = service.Config[configKey].(schema.VisualConfig).Default.(*schema.ServiceAddrStruct).IP[0]
+	}
+	var infoList []model.SchemaFieldModifyInfo
+	query := "SELECT service_name, field_path, field FROM " + model.DeploySchemaFieldModify.TableName + " WHERE product_name=? AND cluster_id=? AND namespace=?"
+	if err := model.USE_MYSQL_DB().Select(&infoList, query, sc.ProductName, clusterId, ""); err != nil {
+		return fmt.Errorf("query deploySchemaFieldModify error: %s", err)
+	}
+	var modifyValue interface{}
+	for _, modify := range infoList {
+		if modify.FieldPath == serviceConfig+".Value" {
+			modifyValue = modify.Field
+		}
+	}
+	log.Infof("configValue :%v, modifyValue %v", configValue, modifyValue)
+	return map[string]interface{}{
+		"pid":         pid,
+		"clusterId":   clusterId,
+		"productName": productName,
+		"serviceName": serviceName,
+		"configKey":   configKey,
+		"configValue": configValue,
+		"modifyvalue": modifyValue,
+	}
+}
+
+// CheckDeployCondition
+// @Description  	Check Deploy Condition
+// @Summary      	检查当前组件的部署条件
+// @Tags         	product
+// @Accept          application/json
+// @Produce 		application/json
+// @Param           cluster_id query  int  false  "集群id"
+// @Param           auto_deploy query  bool  false  "自动部署"
+// @Param           product_name query  string  false  "产品名称"
+// @Param           product_line_name query  string  false  "产品线名称"
+// @Param          product_line_version query  string  false  "产品线版本"
+// @Param           product_type query  int  false  "产品类型"
+// @Success         200  {object} string "{"msg":"ok","code":0,"data":null}"
+// @Router          /api/v2/product/deployCondition [post]
+func CheckDeployCondition(ctx context.Context) apibase.Result {
+	log.Debugf("[Product->CheckDeployCondition] CheckDeployCondition from EasyMatrix API ")
+
+	paramErrs := apibase.NewApiParameterErrors()
+	var param struct {
+		ClusterId          int    `json:"cluster_id"`
+		AutoDeploy         bool   `json:"auto_deploy"`
+		ProductName        string `json:"product_name,omitempty"`
+		ProductLineName    string `json:"product_line_name,omitempty"`
+		ProductLineVersion string `json:"product_line_version,omitempty"`
+		ProductType        int    `json:"product_type"`
+	}
+	if err := ctx.ReadJSON(&param); err != nil {
+		return fmt.Errorf("ReadJSON err: %v", err)
+	}
+	if param.ClusterId == 0 {
+		paramErrs.AppendError("$", fmt.Errorf("cluster_id is empty"))
+	}
+	paramErrs.CheckAndThrowApiParameterErrors()
+
+	if param.AutoDeploy {
+		//自动部署，检查当前组件（包括其依赖组件）是否存在平滑升级版本、产品线是否为空、是否缺失组件包
+		if param.ProductLineName != "" && param.ProductLineVersion != "" {
+			info, err := model.DeployProductLineList.GetProductLineListByNameAndVersion(param.ProductLineName, param.ProductLineVersion)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				log.Errorf("[Product->CheckDeployCondition] get product line err: %v", err)
+				return err
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("产品线 `%v(%v)` 不存在", param.ProductLineName, param.ProductLineVersion)
+			}
+			serials := make([]model.ProductSerial, 0)
+			if err := json.Unmarshal(info.ProductSerial, &serials); err != nil {
+				log.Errorf("[Product->CheckDeployCondition] json unmarshal error: %v", err)
+				return err
+			}
+			productList := make([]string, 0)
+			productRelList := make([]string, 0)
+			for _, serial := range serials {
+				smoothUpgradeProductRel, err := model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterId(serial.ProductName, param.ClusterId)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("query smoothUpgradeProductRel error: %v", err)
+				} else if err == nil {
+					productRelList = append(productRelList, smoothUpgradeProductRel.ProductName)
+				}
+			}
+			if len(productRelList) > 0 {
+				return fmt.Errorf("组件 `%v` 存在平滑升级版本，请勿操作部署。", strings.Join(productRelList, ","))
+			}
+			for _, serial := range serials {
+				productInfoList, _ := model.DeployProductList.GetProductList(serial.ProductName, strconv.Itoa(param.ProductType), nil, nil)
+				if len(productInfoList) == 0 {
+					productList = append(productList, serial.ProductName)
+				}
+			}
+			if len(productList) > 0 {
+				return fmt.Errorf("缺失组件包`%v`，请先上传", strings.Join(productList, ","))
+			}
+		} else if param.ProductLineName == "" && param.ProductLineVersion == "" {
+			return fmt.Errorf("请选择产品线")
+		} else {
+			return fmt.Errorf("product_line_name or product_line_version is empty")
+		}
+	} else {
+		//手动部署，检查当前组件是否有平滑升级版本
+		if param.ProductName == "" {
+			return fmt.Errorf("product_name is empty")
+		}
+		products, _ := model.DeployProductList.GetProductListByNameAndType(param.ProductName, strconv.Itoa(param.ProductType), nil)
+		if len(products) == 0 {
+			log.Errorf("not found product %v", param.ProductName)
+			return fmt.Errorf("组件 `%v` 不存在", param.ProductName)
+		}
+		smoothUpgradeProductRel, err := model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterId(param.ProductName, param.ClusterId)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("query smoothUpgradeProductRel error: %s", err)
+		} else if err == nil {
+			return fmt.Errorf("组件 `%v` 存在平滑升级版本，请勿操作部署。", smoothUpgradeProductRel.ProductName)
+		}
+	}
+
+	return nil
 }

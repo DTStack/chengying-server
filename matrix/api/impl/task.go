@@ -31,6 +31,7 @@ import (
 	"github.com/kataras/iris/context"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -39,6 +40,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	pythonExt = ".py"
+	shellExt  = ".sh"
 )
 
 var taskLock sync.Mutex
@@ -58,6 +64,7 @@ type ResTaskInfo struct {
 
 type ResTaskLog struct {
 	EndTime    string        `json:"end_time"`
+	ExecType   int           `json:"exec_type"`
 	ExecStatus model.Status  `json:"exec_status"`
 	Children   []LogChildren `json:"children"`
 }
@@ -65,6 +72,7 @@ type ResTaskLog struct {
 type LogChildren struct {
 	EndTime    string       `json:"end_time"`
 	Ip         string       `json:"ip"`
+	ExecType   int          `json:"exec_type"`
 	ExecStatus model.Status `json:"exec_status"`
 	ExecResult string       `json:"exec_result"`
 }
@@ -225,32 +233,51 @@ func TaskUpload(ctx context.Context) apibase.Result {
 	taskLock.Lock()
 	defer taskLock.Unlock()
 	file, head, err := ctx.FormFile("file")
-	if err != nil {
+	if errors.Is(err, http.ErrMissingFile) {
+		return fmt.Errorf("请上传脚本")
+	} else if err != nil {
 		return err
 	}
 	defer file.Close()
+	describe := ctx.FormValue("describe")
+	execTimeoutStr := ctx.FormValue("exec_timeout")
+	if execTimeoutStr == "" || execTimeoutStr == "0" {
+		return fmt.Errorf("未配置'超时设置'")
+	}
+	execTimeout, err := strconv.Atoi(execTimeoutStr)
+	if err != nil {
+		return fmt.Errorf("exec_timeout is not number")
+	}
+	logRetentionStr := ctx.FormValue("log_retention")
+	if logRetentionStr == "" || logRetentionStr == "0" {
+		return fmt.Errorf("未配置'执行历史保存周期'")
+	}
+	logRetention, err := strconv.Atoi(logRetentionStr)
+	if err != nil {
+		return fmt.Errorf("log_retention is not number")
+	}
 
 	//限制文件后缀
 	fileExt := path.Ext(head.Filename)
 	var FileAllow = map[string]bool{
-		".py": true,
-		".sh": true,
+		pythonExt: true,
+		shellExt:  true,
 	}
 	if _, ok := FileAllow[fileExt]; !ok {
-		return nil
+		return fmt.Errorf("仅支持 %s，%s 格式文件", pythonExt, shellExt)
 	}
 	//上传文件
 	var (
 		taskPath    = filepath.Join(base.WebRoot, model.TASK_FILES_DIR)
 		absTaskFile = filepath.Join(taskPath, head.Filename)
 	)
-	err, taskId := model.TaskList.InsertTaskIfNotExist(head.Filename, "", "")
+	err, taskId := model.TaskList.InsertTaskIfNotExist(head.Filename, describe, "", execTimeout, logRetention)
 	if err != nil {
 		log.Errorf("[Task->TaskUpload] insert task err: %v", err)
 		return fmt.Errorf("上传失败，%v", err)
 	}
 	defer func() {
-		if err := addSafetyAuditRecord(ctx, "平台管理", "脚本管理", "上传脚本："+head.Filename+",taskId:"+strconv.Itoa(taskId)); err != nil {
+		if err := addSafetyAuditRecord(ctx, "平台管理", "脚本管理", "上传脚本: "+head.Filename+", TaskId: "+strconv.Itoa(taskId)); err != nil {
 			log.Errorf("[Task->TaskUpload] failed to add safety audit record\n")
 		}
 	}()
@@ -275,7 +302,10 @@ func TaskFileContent(ctx context.Context) apibase.Result {
 
 	paramErrs := apibase.NewApiParameterErrors()
 	type res struct {
-		Result string `json:"result"`
+		ScriptContent string `json:"script_content"`
+		Describe      string `json:"describe"`
+		ExecTimeout   int    `json:"exec_timeout"`
+		LogRetention  int    `json:"log_retention"`
 	}
 	id := ctx.Params().Get("id")
 	if id == "" {
@@ -313,8 +343,65 @@ func TaskFileContent(ctx context.Context) apibase.Result {
 	}
 
 	return res{
-		Result: string(content[:]),
+		ScriptContent: string(content[:]),
+		Describe:      info.Describe,
+		ExecTimeout:   info.ExecTimeout,
+		LogRetention:  info.LogRetention,
 	}
+}
+
+func TaskEdit(ctx context.Context) apibase.Result {
+	log.Debugf("[Task->TaskEdit] TaskEdit from EasyMatrix API ")
+
+	param := struct {
+		Describe     string `json:"describe"`
+		ExecTimeout  int    `json:"exec_timeout"`
+		LogRetention int    `json:"log_retention"`
+	}{}
+	id := ctx.Params().Get("id")
+	if id == "" {
+		return fmt.Errorf("id is empty")
+	}
+	taskId, err := strconv.Atoi(id)
+	if err != nil {
+		return fmt.Errorf("id is invalid")
+	}
+	if err := ctx.ReadJSON(&param); err != nil {
+		log.Errorf("parse param error: %v", err)
+		return err
+	}
+	describe := param.Describe
+	execTimeout := param.ExecTimeout
+	if execTimeout == 0 {
+		return fmt.Errorf("未配置'超时设置'")
+	}
+	logRetention := param.LogRetention
+	if logRetention == 0 {
+		return fmt.Errorf("未配置'执行历史保存周期'")
+	}
+
+	info, err := model.TaskList.GetTaskInfoByTaskId(taskId)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Errorf("[Task->TaskEdit] get task info err: %v", err)
+		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("task id is not exist: %v", taskId)
+	}
+	query := "UPDATE " + model.TaskList.TableName + " SET `describe`=?, exec_timeout=?, log_retention=?, update_time=NOW() WHERE id=? AND is_deleted=0"
+	if _, err := model.TaskList.GetDB().Exec(query, describe, execTimeout, logRetention, taskId); err != nil {
+		log.Errorf("[Task->TaskEdit] update task info err: %v", err)
+		return err
+	}
+	//重新添加任务
+	if info.Status == model.TASK_STATUS_ENABLE {
+		if err = addTaskToTimer(info.ID); err != nil {
+			log.Errorf("[Task->TaskEdit] add task to timer err: %v", err)
+			return err
+		}
+	}
+
+	return nil
 }
 
 func ModifyStatus(ctx context.Context) apibase.Result {
@@ -385,7 +472,7 @@ func ModifyStatus(ctx context.Context) apibase.Result {
 		return err
 	}
 	defer func() {
-		if err := addSafetyAuditRecord(ctx, "平台管理", "脚本管理", "修改定时状态，ID："+taskIdStr); err != nil {
+		if err := addSafetyAuditRecord(ctx, "平台管理", "脚本管理", "修改定时状态，TaskId: "+taskIdStr); err != nil {
 			log.Errorf("[Task->ModifyStatus] failed to add safety audit record\n")
 		}
 	}()
@@ -563,7 +650,7 @@ func TaskDelete(ctx context.Context) apibase.Result {
 	}
 	task.ServiceTask.Remove(taskId)
 	defer func() {
-		if err := addSafetyAuditRecord(ctx, "平台管理", "脚本管理", "删除脚本"); err != nil {
+		if err := addSafetyAuditRecord(ctx, "平台管理", "脚本管理", "删除脚本, TaskId: "+id); err != nil {
 			log.Errorf("[Task->TaskDelete] failed to add safety audit record\n")
 		}
 	}()
@@ -640,18 +727,19 @@ func TaskLogs(ctx context.Context) apibase.Result {
 	if err != nil {
 		paramErrs.AppendError("$", fmt.Errorf("id is invalid"))
 	}
+	execStatus := ctx.URLParam("exec-status")
 	paramErrs.CheckAndThrowApiParameterErrors()
 
 	resList := make([]ResTaskLog, 0)
-	opList, count := model.TaskLogList.GetOperationIdByTaskId(taskId, pagination)
+	opList, count := model.TaskLogList.GetOperationIdByTaskId(taskId, execStatus, pagination)
 	for _, v := range opList {
-		r := ResTaskLog{}
-		query := fmt.Sprintf("SELECT ip,exec_status,end_time,exec_result FROM %s "+
-			"WHERE operation_id = ? ORDER BY ip DESC", model.TBL_TASK_LOG)
 		var taskLogList []model.TaskLog
+		query := fmt.Sprintf("SELECT ip,exec_type,exec_status,end_time,exec_result FROM %s "+
+			"WHERE operation_id = ? ORDER BY ip DESC", model.TBL_TASK_LOG)
 		if err := model.TaskLogList.GetDB().Select(&taskLogList, query, v.OperationId); err != nil {
 			return err
 		}
+		r := ResTaskLog{}
 		r.ExecStatus, r.EndTime = getExecStatusAndEndTime(taskLogList)
 		for _, item := range taskLogList {
 			c := LogChildren{}
@@ -661,9 +749,16 @@ func TaskLogs(ctx context.Context) apibase.Result {
 				c.EndTime = ""
 			}
 			c.Ip = item.Ip
+			c.ExecType = item.ExecType
 			c.ExecStatus = item.ExecStatus
 			c.ExecResult = item.ExecResult
-			r.Children = append(r.Children, c)
+			r.ExecType = c.ExecType
+			if execStatus == "" {
+				r.Children = append(r.Children, c)
+			} else if execStatus == strconv.Itoa(int(c.ExecStatus)) {
+				r.Children = append(r.Children, c)
+			}
+
 		}
 		resList = append(resList, r)
 	}

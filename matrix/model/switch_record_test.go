@@ -23,7 +23,7 @@ import (
 	"errors"
 	. "github.com/golang/mock/gomock"
 	. "github.com/smartystreets/goconvey/convey"
-	. "github.com/wangqi811/gomonkey/v2"
+	. "gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey/v2"
 	"reflect"
 	"testing"
 )

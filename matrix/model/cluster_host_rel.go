@@ -130,7 +130,7 @@ func (l *deployClusterHostRel) GetClusterHostRelByIp(ip string) (ClusterHostRel,
 	if err := l.GetDB().Get(&rel, query); err != nil {
 		return rel, err
 	}
-	log.Debugf("%+v",rel)
+	log.Debugf("%+v", rel)
 	return rel, nil
 }
 
@@ -163,4 +163,21 @@ func (l *deployClusterHostRel) UpdateRolesWithSid(sid, roles string) error {
 	}, false)
 
 	return err
+}
+
+type InspectClusterHostRel struct {
+	IP      string  `db:"ip" json:"ip"`
+	DirSize float64 `json:"dir_size"`
+	Sid     string  `db:"sid" json:"sid"`
+}
+
+func (l *deployClusterHostRel) GetInspectClusterHostRelList(clusterId int) ([]InspectClusterHostRel, error) {
+	query := fmt.Sprintf("select dh.ip,dchr.sid from %s dchr "+
+		"left join %s dh on dh.sid=dchr.sid and dchr.is_deleted=0 "+
+		"where clusterId = ? and dh.isDeleted=0", l.TableName, DeployHostList.TableName)
+	res := make([]InspectClusterHostRel, 0)
+	if err := l.GetDB().Select(&res, query, clusterId); err != nil {
+		return res, err
+	}
+	return res, nil
 }

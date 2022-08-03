@@ -991,3 +991,97 @@ func (l *deployInstanceList) GetInstanceBelongServiceWithNamespace(productName s
 	}
 	return res, len(res)
 }
+
+type DeployListStruct struct {
+	ProductName    string `db:"product_name"`
+	ProductVersion string `db:"product_version"`
+	ServiceName    string `db:"service_name"`
+	ServiceVersion string `db:"service_version"`
+	IPs            string `db:"ips"`
+}
+
+func (l *deployInstanceList) GetDeployListInfo() ([]DeployListStruct, error) {
+	deployList := make([]DeployListStruct, 0)
+	query := fmt.Sprintf("select dpl.product_name,dpl.product_version,dil.service_name,dil.service_version," +
+		"group_concat(dil.ip order by dil.ip separator '/') as ips " +
+		"from " + DeployInstanceList.TableName + " dil " +
+		"inner join " + DeployProductList.TableName + " dpl on dil.pid=dpl.id " +
+		"inner join  " + TBL_DEPLOY_HOST + " dh on dh.sid=dil.sid  " +
+		"group by dil.pid,dil.service_name,dil.service_version;")
+	if err := USE_MYSQL_DB().Select(&deployList, query); err != nil {
+		return nil, fmt.Errorf("[GetDeployListInfo] Database err: %v", err)
+	}
+	return deployList, nil
+}
+
+func (l *deployInstanceList) GetInspectServiceInfoById(id int) (int, int, error) {
+	var UnRunningNum, UnHealthyNum int
+	query := fmt.Sprintf("SELECT COUNT(*) AS un_running_count "+
+		"FROM %s dil "+
+		"WHERE dil.status=? AND cluster_id=? group by service_name", DeployInstanceList.TableName)
+	if err := USE_MYSQL_DB().Get(&UnRunningNum, query, INSTANCE_STATUS_RUN_FAIL, id); err != nil && err != sql.ErrNoRows {
+		log.Errorf("GetInspectServiceInfoById query: %v, values %d, err: %v", query, id, err)
+		return UnRunningNum, UnHealthyNum, err
+	}
+	query = fmt.Sprintf("SELECT COUNT(*) AS un_healthy_count FROM %s dil "+
+		"WHERE  dil.health_state=? AND cluster_id=? ", DeployInstanceList.TableName)
+	if err := USE_MYSQL_DB().Get(&UnHealthyNum, query, INSTANCE_STATUS_HEALTH_CHECK_FAIL, id); err != nil && err != sql.ErrNoRows {
+		log.Errorf("GetInspectServiceInfoById query: %v, values %d, err: %v", query, id, err)
+		return UnRunningNum, UnHealthyNum, err
+	}
+	return UnRunningNum, UnHealthyNum, nil
+}
+
+func (l *deployInstanceList) GetNameNodeConfigByIdAndServiceName(id int) (string, string, error) {
+	whereCause := dbhelper.WhereCause{}
+	info := DeployInstanceInfo{}
+	err := l.GetWhere(nil, whereCause.Equal("cluster_id", id).And().
+		Equal("service_name", "hadoop_pkg"), &info)
+	serviceSchema := schema.ServiceConfig{}
+	err = json.Unmarshal(info.Schema, &serviceSchema)
+	if err != nil && err != sql.ErrNoRows {
+		log.Errorf("[GetNameNodeConfigByIdAndServiceName] json.Unmarshal service schema error:%v, cluster id: %v", err.Error(), id)
+		return "", "", err
+	}
+	var namenodeOpts, datanodeOpts string
+	for k, v := range serviceSchema.Config {
+		if k == "namenode_opts" {
+			for key, value := range v.(map[string]interface{}) {
+				if key == "Value" {
+					namenodeOpts = value.(string)
+				}
+			}
+
+		}
+		if k == "datanode_opts" {
+			for key, value := range v.(map[string]interface{}) {
+				if key == "Value" {
+					datanodeOpts = value.(string)
+				}
+			}
+
+		}
+
+	}
+	namenodeOpts = strings.Split(strings.Split(namenodeOpts, " ")[0], "-Xmx")[1]
+	datanodeOpts = strings.Split(strings.Split(datanodeOpts, " ")[0], "-Xmx")[1]
+	return namenodeOpts, datanodeOpts, nil
+}
+
+type InspectServiceList struct {
+	ProductName string `db:"product_name"`
+	ServiceName string `db:"service_name"`
+}
+
+func (l *deployInstanceList) GetServerListNotHadoopById(id int) ([]InspectServiceList, error) {
+	result := make([]InspectServiceList, 0)
+	query := fmt.Sprintf("select dpl.product_name,dil.service_name "+
+		"from %s dil left join %s dpl on dil.pid=dpl.id "+
+		"where dil.status = 'running' and dpl.product_name <> 'Hadoop' and dil.cluster_id = ? "+
+		"group by dpl.product_name, dil.service_name", l.TableName, TBL_DEPLOY_PRODUCT_LIST)
+	if err := USE_MYSQL_DB().Select(&result, query, id); err != nil {
+		log.Errorf("GetServerListNotHadoopById query: %v, cluster_id %d, err: %v", query, id, err)
+		return nil, err
+	}
+	return result, nil
+}

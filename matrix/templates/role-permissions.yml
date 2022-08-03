@@ -1,4 +1,4 @@
-# 1: Administrator, 2: Cluster Operator, 4: Cluster Reader
+# 1: Administrator, 3: Cluster Operator, 7: Cluster Reader
 
 ---
 permissions:
@@ -37,13 +37,25 @@ permissions:
             code: 'service_config_edit'
             permission: 3
             children: []
+          - title: 重置参数
+            code: 'reset_service_config_edit'
+            permission: 1
+            children: []
           - title: 配置下发
             code: 'service_config_distribute'
-            permission: 3
+            permission: 1
             children: []
           - title: 仪表盘查看
             code: 'service_dashboard_view'
             permission: 7
+            children: []
+          - title: 配置主机关联
+            code: 'sub_menu_scheme_host_associated'
+            permission: 1
+            children: []
+          - title: 密码锁
+            code: 'sub_menu_scheme_password_lock'
+            permission: 1
             children: []
       - title: 主机
         code: 'sub_menu_host'
@@ -62,7 +74,7 @@ permissions:
                 children: []
               - title: 日志下载
                 code: 'log_download'
-                permission: 3
+                permission: 7
                 children: []
           - title: 事件诊断
             code: 'sub_menu_diagnose_event'
@@ -74,7 +86,7 @@ permissions:
             children: []
           - title: 巡检报告
             code: 'sub_menu_diagnose_inspect_report'
-            permission: 7
+            permission: 1
             children: []
           - title: 备份管理
             code: 'sub_menu_diagnose_backup'
@@ -206,7 +218,31 @@ permissions:
                 children: []
           - title: 部署组件
             code: 'sub_menu_product_deploy'
-            permission: 3
+            permission: 1
+            children: []
+          - title: 查看进度
+            code: 'sub_menu_service_view_progress'
+            permission: 1
+            children: []
+          - title: 重新部署权限
+            code: 'sub_menu_service_deploy_again'
+            permission: 1
+            children: []
+          - title: 卸载权限
+            code: 'sub_menu_component_delete'
+            permission: 1
+            children: []
+          - title: 强制停止
+            code: 'sub_menu_service_delete_force'
+            permission: 1
+            children: []
+          - title: 强制卸载
+            code: 'sub_menu_service_stop_force'
+            permission: 1
+            children: []
+          - title: 停止卸载
+            code: 'sub_menu_service_stop_delete'
+            permission: 1
             children: []
       - title: 监控告警
         code: 'sub_menu_monitor'
@@ -230,7 +266,7 @@ permissions:
                     children: []
                   - title: 开启/关闭告警
                     code: 'alarm_record_open_close'
-                    permission: 3
+                    permission: 1
                     children: []
               - title: 告警通道
                 code: 'sub_menu_alarm_channel'
@@ -244,9 +280,13 @@ permissions:
                     code: 'alarm_channel_edit'
                     permission: 3
                     children: []
+          - title: 仪表盘操作
+            code: 'sub_menu_service_grafana_edit'
+            permission: 1
+            children: []
   - title: 部署向导
     code: 'menu_deploy_guide'
-    permission: 7
+    permission: 1
     children: []
   - title: 用户管理
     code: 'menu_user_manage'
@@ -292,5 +332,75 @@ permissions:
         code: 'menu_security_audit'
         permission: 7
         children: []
-
-
+      - title: 部署信息下载
+        code: 'menu_deploy_info_markdown_download'
+        permission: 3
+        children: []
+  - title: 系统配置
+    code: 'menu_system_configuration'
+    permission: 1
+    children:
+      - title: 平台安全
+        code: 'sub_menu_configuration_platformsecurity_config'
+        permission: 1
+        children:
+          - title: 查看
+            code: 'sub_menu_configuration_platformsecurity_config_view'
+            permission: 1
+            children: []
+          - title: 编辑
+            code: 'sub_menu_configuration_platformsecurity_config_edit'
+            permission: 1
+            children: []
+      - title: 全局配置
+        code: 'sub_menu_configuration_global_config'
+        permission: 3
+        children:
+          - title: 查看
+            code: 'sub_menu_configuration_global_config_view'
+            permission: 3
+            children: []
+          - title: 编辑
+            code: 'sub_menu_configuration_global_config_edit'
+            permission: 3
+            children: []
+  - title: 平台管理
+    code: 'menu_platform_manager'
+    permission: 7
+    children:
+      - title: 备份配置
+        code: 'sub_menu_configuration_backup_config'
+        permission: 1
+        children:
+          - title: 备份编辑
+            code: 'sub_menu_backup_config_modify'
+            permission: 1
+            children: []
+          - title: 备份查询
+            code: 'sub_menu_backup_config_view'
+            permission: 1
+            children: []
+      - title: 脚本管理
+        code: 'sub_menu_platform_manager_scriptManager'
+        permission: 7
+        children:
+          - title: 查看
+            code: 'sub_menu_platform_manager_scriptManager_view'
+            permission: 7
+            children: []
+          - title: 编辑
+            code: 'sub_menu_configuration_platformsecurity_edit'
+            permission: 3
+            children: []
+  - title: 集群巡检
+    code: 'sub_menu_platform_manager_cluster_inspection'
+    permission: 7
+    children:
+      - title: 查看
+        code: 'sub_menu_platform_manager_cluster_inspection_view'
+        permission: 7
+        children: [ ]
+      - title: 编辑
+        code: 'sub_menu_platform_manager_cluster_inspection_edit'
+        permission: 3
+        children: [ ]

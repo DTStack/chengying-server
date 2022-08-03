@@ -102,10 +102,17 @@ var UserOperationEasyMatrixAPIRoutes = apibase.Route{
 		Middlewares: []context.Handler{
 			apibase.CheckPermission1,
 		},
-		SubRoutes: []apibase.Route{{
-			Path: "platformSecurity",
-			GET:  impl.GetSysconfigPlatformSecurity,
-			POST: impl.ModifySysconfigPlatformSecurity,
-		}},
+		SubRoutes: []apibase.Route{
+			{
+				Path: "platformSecurity",
+				GET:  impl.GetSysconfigPlatformSecurity,
+				POST: impl.ModifySysconfigPlatformSecurity,
+			},
+			{
+				Path: "globalConfig",
+				GET:  impl.GetGlobalConfig,
+				POST: impl.ModifyGlobalConfig,
+			},
+		},
 	}},
 }

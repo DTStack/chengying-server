@@ -26,6 +26,7 @@ import (
 	"dtstack.com/dtstack/easymatrix/matrix/base"
 	"dtstack.com/dtstack/easymatrix/matrix/cache"
 	"dtstack.com/dtstack/easymatrix/matrix/discover"
+	"dtstack.com/dtstack/easymatrix/matrix/encrypt"
 	"dtstack.com/dtstack/easymatrix/matrix/grafana"
 	"dtstack.com/dtstack/easymatrix/matrix/harole"
 	"dtstack.com/dtstack/easymatrix/matrix/health"
@@ -192,6 +193,8 @@ func ParseConfig(configFile string) error {
 
 	// 系统配置初始化
 	cache.InitSysConfig()
+	encrypt.InitPlatformEncrypt()
+
 	if err := base.ConfigureApiServer(apiconf.Host, apiconf.Port, apiconf.StaticUrl, &api.ApiV2Schema, apiconf.Restrict, config.Swagger); err != nil {
 		return err
 	} else {

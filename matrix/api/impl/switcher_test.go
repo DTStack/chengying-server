@@ -26,7 +26,7 @@ import (
 	"github.com/kataras/iris"
 	iriscontext "github.com/kataras/iris/context"
 	. "github.com/smartystreets/goconvey/convey"
-	. "github.com/wangqi811/gomonkey/v2"
+	. "gitlab.prod.dtstack.cn/dt-insight-ops/gomonkey/v2"
 	"net/http/httptest"
 	"reflect"
 	"testing"

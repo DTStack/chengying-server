@@ -942,12 +942,22 @@ func InstanceBelongService(ctx context.Context) apibase.Result {
 	if productName == "" || serviceName == "" {
 		paramErrs.AppendError("$", fmt.Errorf("product_name or service_name is empty"))
 	}
+	clusterIdStr := ctx.URLParam("clusterId")
 	paramErrs.CheckAndThrowApiParameterErrors()
-
-	clusterId, err := GetCurrentClusterId(ctx)
-	if err != nil {
-		log.Errorf("%v", err)
-		return err
+	var clusterId int
+	var err error
+	if clusterIdStr == "" {
+		clusterId, err = GetCurrentClusterId(ctx)
+		if err != nil {
+			log.Errorf("%v", err)
+			return err
+		}
+	} else {
+		clusterId, err = strconv.Atoi(clusterIdStr)
+		if err != nil {
+			log.Errorf("%v", err)
+			return err
+		}
 	}
 	list := []map[string]interface{}{}
 
@@ -1111,9 +1121,31 @@ func InstanceServiceConfig(ctx context.Context) apibase.Result {
 	var productRel model.ClusterProductRel
 
 	productRel, err = model.DeployClusterProductRel.GetByPidAndClusterIdNamespace(info.Pid, info.ClusterId, namespace)
-	if err != nil {
-		log.Errorf("[InstanceServiceConfig] get namespace by pid and clusterid error:%v", err)
-		return fmt.Errorf("[InstanceServiceConfig] get namespace by pid and clusterid error:%s", err)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Errorf("[InstanceServiceConfig] get namespace by pid and clusterid error: %v", err)
+		return fmt.Errorf("[InstanceServiceConfig] get namespace by pid and clusterid error: %v", err)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		smoothUpgradeProductRel, err := model.DeployClusterSmoothUpgradeProductRel.GetByPidAndClusterIdNamespace(info.Pid, info.ClusterId, namespace)
+		if err != nil {
+			log.Errorf("[InstanceServiceConfig] get namespace by pid and clusterid error: %v", err)
+			return fmt.Errorf("[InstanceServiceConfig] get namespace by pid and clusterid error: %v", err)
+		}
+		productRel = model.ClusterProductRel{
+			Id:            smoothUpgradeProductRel.Id,
+			Pid:           smoothUpgradeProductRel.Pid,
+			ClusterId:     smoothUpgradeProductRel.ClusterId,
+			Namespace:     smoothUpgradeProductRel.Namespace,
+			ProductParsed: smoothUpgradeProductRel.ProductParsed,
+			Status:        smoothUpgradeProductRel.Status,
+			DeployUUID:    smoothUpgradeProductRel.DeployUUID,
+			AlertRecover:  smoothUpgradeProductRel.AlertRecover,
+			UserId:        smoothUpgradeProductRel.UserId,
+			IsDeleted:     smoothUpgradeProductRel.IsDeleted,
+			UpdateTime:    smoothUpgradeProductRel.UpdateTime,
+			DeployTime:    smoothUpgradeProductRel.DeployTime,
+			CreateTime:    smoothUpgradeProductRel.CreateTime,
+		}
 	}
 
 	//productRel, err = model.DeployClusterProductRel.GetByPidAndClusterId(info.Pid, info.ClusterId)

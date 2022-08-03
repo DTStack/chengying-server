@@ -57,3 +57,14 @@ func (i *inspectReportTemplate) GetTemplateConfig(clusterId int) ([]BaseTemplate
 	}
 	return configList, nil
 }
+
+func (i *inspectReportTemplate) GetPlatformTemplateConfig() ([]BaseTemplateConfig, error) {
+	var configList []BaseTemplateConfig
+	query := "select `type`, `module`, `metric`, targets, unit, `decimal` " +
+		"from " + TBL_INSPECT_REPORT_TEMPLATE + " where is_deleted=0 and type > 1"
+	if err := USE_MYSQL_DB().Select(&configList, query); err != nil {
+		log.Errorf("get report template config error: %v", err)
+		return nil, err
+	}
+	return configList, nil
+}

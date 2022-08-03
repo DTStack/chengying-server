@@ -34,8 +34,8 @@ import (
 	"strings"
 )
 
-func ApplyWorkloadProcess(cache kube.ClientCache,sc *schema.SchemaConfig, uncheckedSvc []string,
-	namespace string, deployuuid string, pid int, clusterID int, store *model.ImageStore) (bool,error){
+func ApplyWorkloadProcess(cache kube.ClientCache, sc *schema.SchemaConfig, uncheckedSvc []string,
+	namespace string, deployuuid string, pid int, clusterID int, store *model.ImageStore) (bool, error) {
 
 	process := workloadprocess.New()
 	process.Name = strings.ToLower(sc.ProductName)
@@ -47,48 +47,57 @@ func ApplyWorkloadProcess(cache kube.ClientCache,sc *schema.SchemaConfig, unchec
 	process.Spec.ProductVersion = sc.ProductVersion
 	process.Spec.ClusterId = clusterID
 	existing := process.DeepCopy()
-	exist,err := cache.GetClient(namespace).Get(context.TODO(),existing)
-	if err != nil{
-		return false,err
+	exist, err := cache.GetClient(namespace).Get(context.TODO(), existing)
+	if err != nil {
+		return false, err
 	}
-	if exist{
+	if exist {
 		process.Spec.LastDeployUUId = existing.Spec.DeployUUId
 	}
-	undeploy := make(map[string]bool,len(uncheckedSvc))
-	for _, svcName := range uncheckedSvc{
+	undeploy := make(map[string]bool, len(uncheckedSvc))
+	for _, svcName := range uncheckedSvc {
 		undeploy[svcName] = true
 	}
 	ifChanged := false
-	for svcName, svc := range sc.Service{
-		if undeploy[svcName]{
+
+	// 处理workload类型产品包中的依赖组件为非workload类型的服务组件
+	workloadService := map[string]schema.ServiceConfig{}
+	for name, svc := range sc.Service {
+		if svc.Workload != "" {
+			workloadService[name] = svc
+		}
+	}
+
+	for svcName, svc := range workloadService {
+		if undeploy[svcName] {
 			continue
 		}
 		//use the desired version, workload:version
-		workloadVersion := strings.Split(svc.Workload,"@")
+		workloadVersion := strings.Split(svc.Workload, "@")
 		wlTyp := workloadVersion[0]
 		wlversion := ""
-		if len(workloadVersion) ==2 {
+		if len(workloadVersion) == 2 {
 			wlversion = workloadVersion[1]
 		}
-		wl,err := modelkube.WorkloadDefinition.Get(wlTyp,wlversion)
-		if err != nil{
-			return false,err
+		wl, err := modelkube.WorkloadDefinition.Get(wlTyp, wlversion)
+		if err != nil {
+			return false, err
 		}
-		if wl == nil{
-			return false,fmt.Errorf("the workload type %s is not support, please check the workload type",wlTyp)
+		if wl == nil {
+			return false, fmt.Errorf("the workload type %s is not support, please check the workload type", wlTyp)
 		}
-		parts,err := modelkube.WorkloadPart.Select(wl.Id)
-		if err != nil{
-			return false,err
+		parts, err := modelkube.WorkloadPart.Select(wl.Id)
+		if err != nil {
+			return false, err
 		}
-		if parts == nil{
-			return false, fmt.Errorf("the part of workload type %s is nil, please check the workload type",wlTyp)
+		if parts == nil {
+			return false, fmt.Errorf("the part of workload type %s is nil, please check the workload type", wlTyp)
 		}
-		steps := make(map[int][]modelkube.WorloadStepSchema,len(parts))
-		for _, part := range parts{
-			stepTbsc,err := modelkube.WorkloadStep.Select(part.Id)
-			if err != nil{
-				return false,err
+		steps := make(map[int][]modelkube.WorloadStepSchema, len(parts))
+		for _, part := range parts {
+			stepTbsc, err := modelkube.WorkloadStep.Select(part.Id)
+			if err != nil {
+				return false, err
 			}
 			steps[part.Id] = stepTbsc
 		}
@@ -102,11 +111,11 @@ func ApplyWorkloadProcess(cache kube.ClientCache,sc *schema.SchemaConfig, unchec
 			Namespace:   namespace,
 			Store:       store,
 		}
-		workload,err := builder.Build()
-		if err != nil{
-			return false,err
+		workload, err := builder.Build()
+		if err != nil {
+			return false, err
 		}
-		if process.Spec.WorkLoads == nil{
+		if process.Spec.WorkLoads == nil {
 			process.Spec.WorkLoads = map[string]workloadv1beta1.ServiceWorkload{}
 		}
 		process.Spec.WorkLoads[svcName] = workloadv1beta1.ServiceWorkload{
@@ -117,51 +126,51 @@ func ApplyWorkloadProcess(cache kube.ClientCache,sc *schema.SchemaConfig, unchec
 
 		existing := workload.DeepCopy()
 		existing.Namespace = namespace
-		existing.Name = util.BuildWorkloadName(sc.ProductName,svcName)
+		existing.Name = util.BuildWorkloadName(sc.ProductName, svcName)
 		now, err := json.Marshal(existing)
-		if err != nil{
-			log.Errorf("[workloadprocess deploy]: marshal to json fail, err %v",err)
-			return false,err
-		}
-		exist,err = cache.GetClient(namespace).Get(context.TODO(),existing)
-		if err != nil{
+		if err != nil {
+			log.Errorf("[workloadprocess deploy]: marshal to json fail, err %v", err)
 			return false, err
 		}
-		if !exist{
+		exist, err = cache.GetClient(namespace).Get(context.TODO(), existing)
+		if err != nil {
+			return false, err
+		}
+		if !exist {
 			ifChanged = true
 		}
 		last := existing.Annotations[workloadprocessrc.LAST_WITHOUT_ANNOTATION]
 
-		if string(now) != last{
+		if string(now) != last {
 			ifChanged = true
 		}
 	}
-	if err = cache.GetClient(namespace).Apply(context.TODO(),process);err !=nil{
-		return false,err
+	if err = cache.GetClient(namespace).Apply(context.TODO(), process); err != nil {
+		return false, err
 	}
-	return ifChanged,nil
+	return ifChanged, nil
 }
 
-func GetWorkloadProcess(cache kube.ClientCache,sc *schema.SchemaConfig, namespace string) (*workloadv1beta1.WorkloadProcess,error){
+func GetWorkloadProcess(cache kube.ClientCache, sc *schema.SchemaConfig, namespace string) (*workloadv1beta1.WorkloadProcess, error) {
 	process := workloadprocess.New()
 	process.Name = strings.ToLower(sc.ProductName)
 	process.Namespace = namespace
-	exist,err := cache.GetClient(namespace).Get(context.TODO(),process)
-	if err != nil{
-		return nil,err
+	exist, err := cache.GetClient(namespace).Get(context.TODO(), process)
+	if err != nil {
+		return nil, err
 	}
-	if !exist{
+	if !exist {
 		return nil, nil
 	}
-	return process,nil
+	return process, nil
 }
 
-func DeleteWorkloadProcess(cache kube.ClientCache, productname, namespace string) error{
+func DeleteWorkloadProcess(cache kube.ClientCache, productname, namespace string) error {
 	process := workloadprocess.New()
 	process.Namespace = namespace
 	process.Name = strings.ToLower(productname)
-	err := cache.GetClient(namespace).Delete(context.TODO(),process)
-	if err != nil{
+	err := cache.GetClient(namespace).Delete(context.TODO(), process)
+	if err != nil {
 		return err
 	}
 	return nil

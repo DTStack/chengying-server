@@ -48,6 +48,10 @@ type uploadAsyncParam struct {
 	Name []string `json:"name"`
 }
 
+type uploadSyncParam struct {
+	Name string `json:"name"`
+}
+
 // UploadAsync
 // @Description  	upload package async
 // @Summary      	异步上传包
@@ -108,6 +112,54 @@ func UploadAsync(ctx context.Context) apibase.Result {
 		log.Infof("[UploadAsync] file: %v, result: %v", file, result)
 		if _, ok := result.(error); ok {
 			errors = append(errors, result.(error).Error())
+		}
+	}
+	if len(errors) > 0 {
+		return fmt.Errorf(strings.Join(errors, "\n"))
+	}
+	return nil
+}
+
+func UploadSync(ctx context.Context) apibase.Result {
+	param := uploadSyncParam{}
+	if err := ctx.ReadJSON(&param); err != nil {
+		log.Errorf("[UploadSync] invalid param")
+		return fmt.Errorf("参数格式非法")
+	}
+	type fileIdName struct {
+		Id   int
+		Name string
+	}
+	url := param.Name
+	var fileList = make([]fileIdName, 0)
+	var canceledList = make([]string, 0)
+	// 开始下载流程
+	uploadId, err := model.UploadRecord.AddUploadRecord(url, STATUS_RUNNING, UPLOAD_TYPE_PRODUCT)
+	if err == nil {
+		file, err := DownloadFile(int(uploadId), url)
+		if err != nil {
+			log.Errorf("[UploadAsync] download file error: %v", err)
+		}
+		_, err = model.UploadRecord.GetCancelProductById(int(uploadId))
+		if err == nil {
+			log.Errorf("[UploadAsync] upload %v canceled", uploadId)
+			canceledList = append(canceledList, file)
+		} else {
+			fileList = append(fileList, fileIdName{int(uploadId), file})
+		}
+	}
+	for _, file := range canceledList {
+		_ = os.Remove(file)
+	}
+	errors := make([]string, 0)
+	for _, file := range fileList {
+		result := DoUnzipAndParse(file.Name, 1)
+		model.UploadRecord.DeleteUploadingProduct(file.Id)
+		log.Infof("[UploadAsync] file: %v, result: %v", file, result)
+		if _, ok := result.(error); ok {
+			errors = append(errors, result.(error).Error())
+		} else {
+			return result
 		}
 	}
 	if len(errors) > 0 {

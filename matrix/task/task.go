@@ -107,6 +107,7 @@ func (task Task) Initialize() {
 	if err != nil {
 		log.Errorf("[Task] 定时任务初始化，获取任务列表错误: %s", err)
 	}
+	task.clearTaskLogs()
 	for _, taskInfo := range taskList {
 		if _, err = checkCrontabExpr(taskInfo.Spec); err != nil {
 			log.Errorf("[Task] 定时任务初始化，%s，cron表达式填写错误：%v", taskInfo.Name, err)
@@ -257,7 +258,8 @@ func execJob(taskModel model.TaskInfo) []TaskResult {
 			if err != nil {
 				errorMsg = err.Error()
 			} else {
-				output, err = agent.AgentClient.ToExecCmd(host.Sid, "", cmd, "")
+				execTimeout := strconv.Itoa(taskModel.ExecTimeout) + "s"
+				output, err = agent.AgentClient.ToExecCmdWithTimeout(host.Sid, "", cmd, execTimeout, "", "")
 				if err != nil {
 					errorMsg = err.Error()
 				}
@@ -290,4 +292,30 @@ func checkCrontabExpr(cronStr string) (*cronexpr.Expression, error) {
 		return nil, err
 	}
 	return expr, nil
+}
+
+//clearTaskLogs 日志清理（每天0点执行）
+func (task Task) clearTaskLogs() {
+	spec := "0 0 0 * * *"
+	cronName := strconv.Itoa(0)
+	taskFunc := func() {
+		log.Debugf("[Task] 开始执行日志清理任务...")
+		taskList, err := model.TaskList.GetTaskInfoList()
+		if err != nil {
+			log.Errorf("[Task] 执行日志清理任务，获取任务列表错误: %s", err)
+		}
+		for _, task := range taskList {
+			query := fmt.Sprintf("DELETE FROM %s WHERE task_id = ? AND start_time <= DATE_SUB(NOW(), INTERVAL ? DAY)", model.TaskLogList.TableName)
+			if _, err := model.USE_MYSQL_DB().Exec(query, task.ID, task.LogRetention); err != nil {
+				log.Errorf("[Task] 执行日志清理任务，日志清理错误: %v", err)
+			}
+		}
+		log.Debugf("[Task] 执行日志清理任务完成")
+	}
+	err := goutil.PanicToError(func() {
+		serviceCron.AddFunc(spec, taskFunc, cronName)
+	})
+	if err != nil {
+		log.Errorf("[Task] 添加日志清理任务到调度器失败,err: %v", err)
+	}
 }

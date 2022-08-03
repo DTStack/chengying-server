@@ -19,6 +19,7 @@ package upgrade
 
 import (
 	"fmt"
+	"github.com/jmoiron/sqlx"
 	"time"
 
 	dbhelper "dtstack.com/dtstack/easymatrix/go-common/db-helper"
@@ -45,13 +46,15 @@ type BackupHistoryInfo struct {
 	CreateTime  time.Time `db:"create_time" json:"create_time"`
 }
 
-func (b *backupHistory) InsertRecord(clusterId int, dbName, backupSql, productName string) (int64, error) {
-	ret, err := b.InsertWhere(dbhelper.UpdateFields{
-		"cluster_id":   clusterId,
-		"db_name":      dbName,
-		"backup_sql":   backupSql,
-		"product_name": productName,
-	})
+func (b *backupHistory) InsertRecord(clusterId int, dbName, backupSql, productName string, tx *sqlx.Tx) (int64, error) {
+	ret, err := tx.Exec(fmt.Sprintf("INSERT INTO %s (cluster_id, db_name, backup_sql, product_name) VALUES (?, ?, ?, ?)", b.TableName),
+		clusterId, dbName, backupSql, productName)
+	//ret, err := b.InsertWhere(dbhelper.UpdateFields{
+	//	"cluster_id":   clusterId,
+	//	"db_name":      dbName,
+	//	"backup_sql":   backupSql,
+	//	"product_name": productName,
+	//})
 	if err != nil {
 		return 0, err
 	}
