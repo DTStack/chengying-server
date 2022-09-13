@@ -88,10 +88,41 @@ func (s *sm) Encrypt(msg []byte) ([]byte, error) {
 	return encrptData, err
 }
 
-func NewSm2Encrypt() SM2encrypt {
-	priv, _ := sm2.GenerateKey(rand.Reader) // 生成密钥对
-	//fmt.Printf("GetPubliKey: 04%x%x\n", priv.PublicKey.X, priv.PublicKey.Y)
-	//fmt.Printf("GetPrivateKey: %x\n", priv.D)
+// 这个库有点坑，有时候生成的key会有问题，自己加密后的东西自己都无法解密
+// 自己先测试一下，如果有问题，重新再生成一个
+func available(privatekey *sm2.PrivateKey) bool {
+	var (
+		value = "test"
+	)
+	encrypts1Str, err1 := privatekey.EncryptAsn1([]byte(value), rand.Reader)
+	decrypts1Str, err2 := privatekey.DecryptAsn1(encrypts1Str)
+	if err1 != nil || err2 != nil || string(decrypts1Str) != value {
+		log.Debugf("%v %v", err1, err2)
+		return false
+	}
+	log.Debugf("sm2 加密测试：test == %s\n", string(decrypts1Str))
+	return true
+}
+
+func NewSm2Encrypt() *sm {
+	var (
+		priv  *sm2.PrivateKey
+		err   error
+		retry = 100
+	)
+
+	for i := 0; i < retry; i++ {
+		priv, err = sm2.GenerateKey(rand.Reader) // 生成密钥对
+		if err != nil {
+			log.Debugf("[sm2.GenerateKey] err: %v", err)
+			continue
+		}
+		if available(priv) {
+			break
+		}
+	}
+	log.Debugf("[sm2 PubliKey]: 04%x%x\n", priv.PublicKey.X, priv.PublicKey.Y)
+	log.Debugf("[sm2 PrivateKey]: %x\n", priv.D)
 	return &sm{
 		privatekey: priv,
 		publickey:  &priv.PublicKey,

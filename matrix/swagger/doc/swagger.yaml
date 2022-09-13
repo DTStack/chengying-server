@@ -1,5 +1,79 @@
 basePath: /api/v2
 definitions:
+  cache.InspectConfig:
+    properties:
+      dir_size:
+        type: integer
+      fullGC_frequency:
+        type: integer
+      fullGC_time:
+        type: integer
+      node_cpu_usage:
+        type: integer
+      node_disk_usage:
+        type: integer
+      node_inode_usage:
+        type: integer
+      node_mem_usage:
+        type: integer
+    type: object
+  impl.FromStruct:
+    properties:
+      form_head:
+        items:
+          type: string
+        type: array
+      form_value:
+        items:
+          items:
+            type: string
+          type: array
+        type: array
+    type: object
+  impl.NodeInfo:
+    properties:
+      agent_error_num:
+        type: integer
+      alerting_num:
+        type: integer
+      total:
+        type: integer
+    type: object
+  impl.Response:
+    properties:
+      data_node_dead_nums:
+        type: integer
+      data_node_live_nums:
+        type: integer
+      data_node_mem:
+        type: string
+      hdfs_file_num:
+        type: integer
+      name_node_mem:
+        type: string
+    type: object
+  impl.Result:
+    properties:
+      have_name_node:
+        type: integer
+      mysql_slave_status:
+        type: integer
+      node_status:
+        $ref: '#/definitions/impl.NodeInfo'
+      service_status:
+        $ref: '#/definitions/impl.ServiceInfo'
+    type: object
+  impl.ServiceInfo:
+    properties:
+      alerting_num:
+        type: integer
+      healthy_check_error_num:
+        type: integer
+      host_down_num:
+        type: integer
+      running_fail_num:
+        type: integer
+    type: object
   impl.hostDeleteParam:
     properties:
       aid:
@@ -31,6 +105,21 @@ definitions:
         items:
           type: string
         type: array
+    type: object
+  model.BaseTemplateConfig:
+    properties:
+      decimal:
+        type: integer
+      metric:
+        type: string
+      module:
+        type: string
+      targets:
+        type: string
+      type:
+        type: integer
+      unit:
+        type: string
     type: object
   util.ApiShipperCheck:
     properties:
@@ -452,6 +541,147 @@ paths:
       summary: 查询所有agent
       tags:
       - agent
+  /api/v2/common/deployInfo/download:
+    get:
+      description: 部署信息文档下载
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: '{"msg":"ok","code":0,"data":{}}'
+          schema:
+            type: string
+      summary: 部署信息文档下载
+      tags:
+      - common
+  /api/v2/common/deployInfo/generate:
+    post:
+      description: 生成部署信息文档
+      parameters:
+      - description: EM 版本号
+        in: query
+        name: em_version
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: '{"msg":"ok","code":0,"data":{}}'
+          schema:
+            type: string
+      summary: 生成部署信息文档
+      tags:
+      - common
+  /api/v2/platform/inspect/baseInfo/name_node:
+    get:
+      description: 大数据运行服务基础信息
+      parameters:
+      - description: Cluster ID
+        in: query
+        name: cluster_id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/impl.Response'
+      summary: 大数据运行服务基础信息
+      tags:
+      - Inspect
+  /api/v2/platform/inspect/baseInfo/status:
+    get:
+      description: 获取巡检报告基本信息
+      parameters:
+      - description: Cluster ID
+        in: query
+        name: cluster_id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/impl.Result'
+      summary: 获取巡检报告基本信息
+      tags:
+      - Inspect
+  /api/v2/platform/inspect/form/data:
+    get:
+      description: 获取巡检报告表格信息
+      parameters:
+      - description: Cluster ID
+        in: query
+        name: cluster_id
+        required: true
+        type: integer
+      - description: form_title
+        in: query
+        name: form_title
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/impl.FromStruct'
+      summary: 获取巡检报告表格信息
+      tags:
+      - Inspect
+  /api/v2/platform/inspect/graph/config:
+    get:
+      description: 获取图表配置列表
+      parameters:
+      - description: Cluster ID
+        in: query
+        name: cluster_id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/model.BaseTemplateConfig'
+            type: array
+      summary: 获取图表配置列表
+      tags:
+      - Inspect
+  /api/v2/platform/inspect/graph/config/update:
+    post:
+      description: 修改巡检报告统计配置
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: '{"msg":"ok","code":0,"data":{}}'
+          schema:
+            type: string
+      summary: 修改巡检报告统计配置
+      tags:
+      - Inspect
+  /api/v2/platform/inspect/statisticsConfig:
+    get:
+      description: 获取巡检报告统计配置
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/cache.InspectConfig'
+      summary: 获取巡检报告统计配置
+      tags:
+      - Inspect
   /api/v2/product/{pid}/start:
     get:
       consumes:

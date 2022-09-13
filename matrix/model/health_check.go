@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	dbhelper "dtstack.com/dtstack/easymatrix/go-common/db-helper"
 	"dtstack.com/dtstack/easymatrix/matrix/log"
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -106,4 +107,13 @@ func (h *healthCheck) UpdateHealthCheckStatus(id, execStatus int, errorMessage s
 		"end_time":      endTime,
 	}, false)
 	return err
+}
+
+func (h *healthCheck) DeleteByIp(ip string) error {
+	deleteSqlStr := fmt.Sprintf("DELETE FROM %s WHERE ip = ? ", h.TableName)
+	_, err := h.GetDB().Exec(deleteSqlStr, ip)
+	if err != nil {
+		return err
+	}
+	return nil
 }

@@ -13,6 +13,7 @@ app_dir='{{.AGENT_DIR}}'
 agent_bin='{{.AGENT_BIN}}'
 run_user='{{.RUN_USER}}'
 data_dir='{{.DATA_DIR}}'
+unzip_tmp_dir='/opt/dtstack/tmp'
 
 #安装包下载地址
 DOWNLOAD_URL='{{.AGENT_DOWNLOAD_URL}}'
@@ -22,14 +23,17 @@ trap '[ "$?" -eq 0 ] || read -p "Looks like something went wrong in step ´$STEP
 ##install the filebeat##
 install_agent() {
     mkdir -p "$app_dir"
-    unzip -o "/tmp/$agent_zip" -d "$app_dir"  >/dev/null 2>&1
+    unzip -o "$unzip_tmp_dir/$agent_zip" -d "$app_dir"  >/dev/null 2>&1
 }
 
 ##download and installed##
 install(){
     STEP='install agent'
     echo "Use the curl download and install Please Waiting..."
-    cd /tmp/ && curl -L -O -s "$DOWNLOAD_URL"
+    if [ ! -d "$unzip_tmp_dir" ];then
+        sudo mkdir -p $unzip_tmp_dir
+    fi
+    cd "$unzip_tmp_dir" && sudo curl -L -O -s "$DOWNLOAD_URL"
     install_agent
 
     if [ ! -f "$agent_bin" ];then
@@ -63,7 +67,7 @@ chowns(){
 ##delete filebeat pkg##
 delete(){
     STEP='delete'
-    cd /tmp/ && rm -f "$agent_zip"
+    cd "$unzip_tmp_dir" && sudo rm -f "$agent_zip"
 }
 
 install

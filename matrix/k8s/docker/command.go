@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 func Login(username, address, password string) error {
@@ -51,21 +52,70 @@ func OutputStdLog(std io.Reader, deployUUID string) {
 	}
 }
 
-func Load(file, deployUuid string) error {
+func OutputStdLogWithRet(std io.Reader, deployUUID string, output *[]string) {
+	//实时循环读取输出流中的一行内容
+	reader := bufio.NewReader(std)
+	for {
+		line, err2 := reader.ReadString('\n')
+		if err2 != nil || io.EOF == err2 {
+			break
+		}
+		*output = append(*output, line)
+		log.OutputInfof(deployUUID, "%v", line)
+	}
+}
+
+/*
+b2d5eeeaba3a: Loading layer [==================================================>]   5.88MB/5.88MB
+b5d14f4aebad: Loading layer [==================================================>]  18.24MB/18.24MB
+35e4637a9d6c: Loading layer [==================================================>]  3.072kB/3.072kB
+7ff80c2c03d5: Loading layer [==================================================>]  4.096kB/4.096kB
+6e8309ec6bfd: Loading layer [==================================================>]  3.584kB/3.584kB
+a7c11ed26fd5: Loading layer [==================================================>]  7.168kB/7.168kB
+7f598054d646: Loading layer [==================================================>]  2.048kB/2.048kB
+53062ac1a12b: Loading layer [==================================================>]  3.072kB/3.072kB
+92c327b8726e: Loading layer [==================================================>]  1.672MB/1.672MB
+0a91289117b4: Loading layer [==================================================>]  3.072kB/3.072kB
+20fa73f7ad0f: Loading layer [==================================================>]  5.489MB/5.489MB
+464db9ec72d8: Loading layer [==================================================>]  3.433MB/3.433MB
+3f666b083f1c: Loading layer [==================================================>]    130kB/130kB
+5e7458eed436: Loading layer [==================================================>]  3.584kB/3.584kB
+b860ae2f768f: Loading layer [==================================================>]  4.608kB/4.608kB
+88e637af7547: Loading layer [==================================================>]  4.608kB/4.608kB
+Loaded image: easymanager/manage-front:2.11.5-rel
+*/
+func Load(file, deployUuid string) (string, error) {
 	log.Debugf("docker load ...")
 	load := exec.Command("docker", "load", "-i", file)
 	stdout, err := load.StdoutPipe()
+	output := []string{}
+	var image string
 	if err == nil {
-		go OutputStdLog(stdout, deployUuid)
+		go OutputStdLogWithRet(stdout, deployUuid, &output)
 	}
 	stderr, err := load.StderrPipe()
 	if err == nil {
 		go OutputStdLog(stderr, deployUuid)
 	}
 	if err := load.Run(); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+
+	for _, line := range output {
+		if strings.Contains(line, "Loaded image:") {
+			images := strings.Split(line, ": ")
+			if len(images) == 2 {
+				image = images[1]
+			}
+			break
+		}
+	}
+
+	if image != "" {
+		image = strings.Replace(image, "\n", "", -1)
+	}
+
+	return image, nil
 }
 
 func Tag(new, old string) error {

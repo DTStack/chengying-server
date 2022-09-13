@@ -32,6 +32,7 @@ type InstallParms struct {
 	HealthRetries     int    `json:"healthRetries"`
 	WorkDir           string `json:"workDir"`
 	RunUser           string `json:"runUser"`
+	Timeout           string `json:"timeout,omitempty"`
 }
 
 type StartParams struct {

@@ -25,6 +25,11 @@ import (
 	"time"
 )
 
+const (
+	SMOOTH_UPGRADE_MODE   = "smooth"
+	STANDARD_UPGRADE_MODE = "standard"
+)
+
 type upgradeHistory struct {
 	dbhelper.DbTable
 }
@@ -49,17 +54,24 @@ type HistoryInfo struct {
 	CreateTime        sql.NullTime `db:"create_time" json:"create_time"`
 	Type              int          `db:"type" json:"type"`
 	BackupSql         string       `db:"backup_sql" json:"backup_sql"`
+	UpgradeMode       string       `db:"upgrade_mode" json:"upgrade_mode"`
 	IsDeleted         bool         `db:"is_deleted" json:"is_deleted"`
 }
 
-func (u *upgradeHistory) InsertRecord(clusterId, upgradeType int, productName, sourceVersion, targetVersion, backupName, backupSql string,
+func (u *upgradeHistory) InsertRecord(clusterId, upgradeType int, upgradeMode, productName, sourceVersion, targetVersion, backupName, backupSql string,
 	serviceIp, sourceConfig, sourceMultiConfig []byte) (int64, error) {
 	var history HistoryInfo
-	err := u.GetWhere(nil, dbhelper.MakeWhereCause().Equal("cluster_id", clusterId).And().
+	whereCause := dbhelper.WhereCause{}
+	whereCause = whereCause.Equal("cluster_id", clusterId).And().
 		Equal("product_name", productName).And().
 		Equal("source_version", sourceVersion).And().
 		Equal("target_version", targetVersion).And().
-		Equal("backup_name", backupName), &history)
+		Equal("upgrade_mode", upgradeMode).And().
+		Equal("is_deleted", 0)
+	if upgradeMode != SMOOTH_UPGRADE_MODE {
+		whereCause = whereCause.And().Equal("backup_name", backupName)
+	}
+	err := u.GetWhere(nil, whereCause, &history)
 	if err != nil && err == sql.ErrNoRows {
 		r, err := u.InsertWhere(dbhelper.UpdateFields{
 			"cluster_id":          clusterId,
@@ -73,6 +85,7 @@ func (u *upgradeHistory) InsertRecord(clusterId, upgradeType int, productName, s
 			"create_time":         time.Now(),
 			"type":                upgradeType,
 			"backup_sql":          backupSql,
+			"upgrade_mode":        upgradeMode,
 			"is_deleted":          0,
 		})
 		if err != nil {
@@ -86,12 +99,15 @@ func (u *upgradeHistory) InsertRecord(clusterId, upgradeType int, productName, s
 	}
 }
 
-func (u *upgradeHistory) GetByClsAndProductNameAndSourceVersion(clusterId int, productName, sourceVersion string) ([]HistoryInfo, error) {
+func (u *upgradeHistory) GetByClsAndProductNameAndSourceVersion(clusterId int, productName, sourceVersion, upgradeMode string) ([]HistoryInfo, error) {
 	whereClause := dbhelper.MakeWhereCause().Equal("cluster_id", clusterId).And().
 		Equal("product_name", productName).And().
 		Equal("is_deleted", 0)
 	if sourceVersion != "" {
 		whereClause = whereClause.And().Equal("source_version", sourceVersion)
+	}
+	if upgradeMode != "" {
+		whereClause = whereClause.And().Equal("upgrade_mode", upgradeMode)
 	}
 	rows, _, err := u.SelectWhere(nil, whereClause, nil)
 	if err != nil {
@@ -128,4 +144,22 @@ func (u *upgradeHistory) GetOne(clusterId int, productName, sourceVersion, backu
 		return nil, err
 	}
 	return &info, nil
+}
+
+func (u *upgradeHistory) GetTargetVersionInfo(clusterId int, productName, sourceVersion, productType, upgradeMode string) ([]model.DeployProductListInfoWithNamespace, error) {
+	list := make([]model.DeployProductListInfoWithNamespace, 0)
+	var values []interface{}
+	query := "SELECT p.id, p.parent_product_name, p.product_name, p.product_version, p.product_type from deploy_product_list as p " +
+		"LEFT JOIN deploy_upgrade_history as u ON p.product_version = u.target_version AND p.product_name = u.product_name " +
+		"WHERE u.cluster_id = ? AND u.product_name = ? AND u.source_version = ? AND u.upgrade_mode = ? AND u.is_deleted = 0"
+	values = append(values, clusterId, productName, sourceVersion, upgradeMode)
+	if productType != "" {
+		query += " AND p.product_type = ?"
+		values = append(values, productType)
+	}
+	err := model.USE_MYSQL_DB().Select(&list, query, values...)
+	if err != nil {
+		return list, err
+	}
+	return list, nil
 }

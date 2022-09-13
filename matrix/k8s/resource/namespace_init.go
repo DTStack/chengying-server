@@ -210,7 +210,7 @@ func kubeconfigClientInit(ctx context.Context, cache kube.ClientCache, vo *view.
 
 //install dockerconfigjson secret, operator deployment required
 //sa,role,rolebinding optional
-func namespaceInit(ctx context.Context, cache kube.ClientCache, namespace string, registryId ,clusterid int) error {
+func namespaceInit(ctx context.Context, cache kube.ClientCache, namespace string, registryId, clusterid int) error {
 	logType := "promtail"
 	logServerAddress := "loki:3000"
 	logImage := "promtail:latest"
@@ -310,6 +310,25 @@ func namespaceInit(ctx context.Context, cache kube.ClientCache, namespace string
 	return nil
 }
 
+func getDefaultWithEnv(key, defaultValue string) string {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return defaultValue
+	}
+	return v
+}
+
+func createMoleImage(registryUrl string) string {
+	image := getDefaultWithEnv("MOLE_IMAGE", "easymatrix/operator:apadp1.23.3")
+	if !strings.HasSuffix(registryUrl, "/") {
+		registryUrl = registryUrl + "/"
+	}
+	if strings.HasPrefix(image, "/") {
+		image = strings.TrimPrefix(image, "/")
+	}
+	return registryUrl + image
+}
+
 //secret of type dockerconfigjson and mole operator is required
 func generateRequired(sc *modelkube.ImportInitMoudleSchema, namespace string, tbsc *modelkube.DeployClusterImageStoreSchema, clusterId int) (map[string]runtime.Object, error) {
 	// dockerconfigjson secret
@@ -322,7 +341,7 @@ func generateRequired(sc *modelkube.ImportInitMoudleSchema, namespace string, tb
 	//if tbsc == nil {
 	//	return nil, fmt.Errorf("the registry of %d is nil in the database", registryId)
 	//}
-	se, err := secret.GetDockerConfigJson(clusterImageStore, namespace,tbsc.Alias)
+	se, err := secret.GetDockerConfigJson(clusterImageStore, namespace, tbsc.Alias)
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +354,7 @@ func generateRequired(sc *modelkube.ImportInitMoudleSchema, namespace string, tb
 	}
 	data := map[string]string{
 		"NAME_SPACE":  namespace,
-		"REGISTRY":    tbsc.Address,
+		"MOLE_IMAGE":  createMoleImage(tbsc.Address),
 		"SECRET_NAME": se.Name,
 	}
 	if err := generateTemplate("operator", sc.Operator, data, &buf); err != nil {

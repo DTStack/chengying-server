@@ -63,3 +63,11 @@ func ConvertDNSRuleName(s string) string {
 func BuildResourceNameWithNamespace(resourceType, parentProductName, productName, serviceName, namespace string) string {
 	return fmt.Sprintf("%v-%v-%v-%v.%v", resourceType, ConvertDNSRuleName(parentProductName), ConvertDNSRuleName(productName), ConvertDNSRuleName(serviceName), namespace)
 }
+
+func BuildWorkloadServiceName(productName, serviceName, partName, stepName, namespace string) string {
+	return fmt.Sprintf("%v-%v-%v-%v.%v", ConvertDNSRuleName(productName), ConvertDNSRuleName(serviceName), ConvertDNSRuleName(partName), ConvertDNSRuleName(stepName), namespace)
+}
+
+func BuildWorkloadPodName(productName, serviceName, partName, stsnumber string) string {
+	return fmt.Sprintf("%v-%v-%v-%v", ConvertDNSRuleName(productName), ConvertDNSRuleName(serviceName), ConvertDNSRuleName(partName), stsnumber)
+}

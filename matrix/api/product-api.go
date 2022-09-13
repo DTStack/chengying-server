@@ -57,6 +57,14 @@ var ProductOperationEasyMatrixAPIRoutes = apibase.Route{
 			},
 		},
 	}, {
+		Path: "uploadSync",
+		POST: impl.UploadSync,
+		Docs: apibase.Docs{
+			POST: &apibase.ApiDoc{
+				Name: "根据链接同步上传产品包接口[EasyMatrix API]",
+			},
+		},
+	}, {
 		Path: "check_param",
 		POST: impl.CheckAvailableLink,
 		Docs: apibase.Docs{
@@ -229,6 +237,14 @@ var ProductOperationEasyMatrixAPIRoutes = apibase.Route{
 							},
 						},
 					}, {
+						Path: "modify_schema_field_devops",
+						POST: impl.ModifySchemaFieldForDevOps,
+						Docs: apibase.Docs{
+							POST: &apibase.ApiDoc{
+								Name: "修改schema字段接口[EasyMatrix API]",
+							},
+						},
+					}, {
 						Path: "modify_schema_field_batch",
 						POST: impl.ModifySchemaFieldBatch,
 						Docs: apibase.Docs{
@@ -276,9 +292,10 @@ var ProductOperationEasyMatrixAPIRoutes = apibase.Route{
 						},
 					}, {
 						Path: "modifyAll",
-						Middlewares: []context.Handler{
-							apibase.CheckPermission3,
-						},
+						// HIDE Temporary For DevOps
+						//Middlewares: []context.Handler{
+						//	apibase.CheckPermission3,
+						//},
 						POST: impl.ModifyAll,
 						Docs: apibase.Docs{
 							POST: &apibase.ApiDoc{
@@ -396,8 +413,20 @@ var ProductOperationEasyMatrixAPIRoutes = apibase.Route{
 						Name: "获得产品发布后的组件更新历史记录[EasyMatrix API]",
 					},
 				},
-			},
-			{
+			}, {
+				//http:://xxxx/api/v2/product/{product_name}/serviceUpdate
+				Path: "serviceUpdate",
+				POST: impl.ServiceUpdate,
+				Docs: apibase.Docs{
+					POST: &apibase.ApiDoc{
+						Name: "批量设置产品服务信息[EasyMatrix API]",
+						Body: apibase.ApiParams{
+							"$.field_path": apibase.ApiParam{"string", "schema,如run_user", "", true},
+							"$.field":      apibase.ApiParam{"interface", "value", "", true},
+						},
+					},
+				},
+			}, {
 				Path: "autoTest",
 				SubRoutes: []apibase.Route{
 					{
@@ -463,6 +492,15 @@ var ProductOperationEasyMatrixAPIRoutes = apibase.Route{
 						},
 					},
 					SubRoutes: []apibase.Route{{
+						//http:://xxxx/api/v2/product/{product_name}/version/{product_version}/deployDevOps
+						Path: "deployDevOps",
+						POST: impl.DeployForDevOps,
+						Docs: apibase.Docs{
+							GET: &apibase.ApiDoc{
+								Name: "部署该产品该版本接口[EasyMatrix API]",
+							},
+						},
+					}, {
 						//http:://xxxx/api/v2/product/{product_name}/version/{product_version}/deploy
 						Path: "deploy",
 						POST: impl.Deploy,
@@ -621,19 +659,6 @@ var ProductOperationEasyMatrixAPIRoutes = apibase.Route{
 							},
 						},
 					}, {
-						//http:://xxxx/api/v2/product/{product_name}/version/{product_version}/serviceUpdate
-						Path: "serviceUpdate",
-						POST: impl.ServiceUpdate,
-						Docs: apibase.Docs{
-							POST: &apibase.ApiDoc{
-								Name: "批量设置产品服务信息[EasyMatrix API]",
-								Body: apibase.ApiParams{
-									"$.field_path": apibase.ApiParam{"string", "schema,如run_user", "", true},
-									"$.field":      apibase.ApiParam{"interface", "value", "", true},
-								},
-							},
-						},
-					}, {
 						//http:://xxxx/api/v2/product/{product_name}/version/{product_version}/serviceGraphy?unchecked_services=***
 						Path: "serviceGraphy",
 						POST: impl.ServicesGraphy,
@@ -665,6 +690,15 @@ var ProductOperationEasyMatrixAPIRoutes = apibase.Route{
 						},
 					}},
 				},
+				},
+			}, {
+				//http:://xxxx/api/v2/product/{product_name}/checkMysqlAddr
+				Path: "checkMysqlAddr",
+				POST: impl.CheckMysqlAddr,
+				Docs: apibase.Docs{
+					GET: &apibase.ApiDoc{
+						Name: "MySQL地址校验[EasyMatrix API]",
+					},
 				},
 			}, {
 				//http://xxxx/api/v2/product/{product_name}/backupDb
@@ -766,6 +800,35 @@ var ProductOperationEasyMatrixAPIRoutes = apibase.Route{
 		Docs: apibase.Docs{
 			GET: &apibase.ApiDoc{
 				Name: "返回配置修改组的所有信息[EasyMatrix API]",
+			},
+		},
+	}, {
+		// FOR DEVOPS
+		//http:://xxxx/api/v2/product/getServiceConfig?product_name=&clusterId=&pid=&configPath=
+		Path: "getServiceConfig",
+		GET:  impl.GetServiceConfig,
+		Docs: apibase.Docs{
+			GET: &apibase.ApiDoc{
+				Name: "返回服务配置信息[EasyMatrix API]",
+			},
+		},
+	}, {
+		//http:://xxxx/api/v2/product/product_name_list
+		//GET Product NAME
+		Path: "product_name_list",
+		GET:  impl.GetProductNameList,
+		Docs: apibase.Docs{
+			GET: &apibase.ApiDoc{
+				Name: "返回组件名称列表接口[EasyMatrix API]",
+			},
+		},
+	}, {
+		//http:://xxxx/api/v2/product/deployCondition
+		Path: "deployCondition",
+		POST: impl.CheckDeployCondition,
+		Docs: apibase.Docs{
+			GET: &apibase.ApiDoc{
+				Name: "检查当前组件的部署条件[EasyMatrix API]",
 			},
 		},
 	}},

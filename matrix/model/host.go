@@ -52,6 +52,19 @@ type HostInfo struct {
 	RoleList   sql.NullString `db:"role_list" json:"-"`
 }
 
+type HostRunningInfo struct {
+	MemSize   int64          `db:"mem_size"`
+	MemUsage  int64          `db:"mem_usage"`
+	DiskUsage sql.NullString `db:"disk_usage"`
+	CpuCores  int            `db:"cpu_cores"`
+	CpuUsage  float64        `db:"cpu_usage"`
+	Load1     float64        `db:"load1"`
+	Status    int            `db:"status"`
+	LocalIp   string         `db:"local_ip"`
+	Id        int            `db:"id"`
+	Updated   base.Time      `db:"updated"`
+}
+
 func (l *deployHostList) AutoCreateAid(host, group string) (error, int) {
 	whereCause := dbhelper.WhereCause{}
 	info := HostInfo{}
@@ -381,4 +394,41 @@ func (l *deployHostList) GetRunHostListByClusterId(id int) (hosts []HostInfo) {
 		return nil
 	}
 	return
+}
+
+type HostInspectInfo struct {
+	Ip          string `db:"ip" json:"ip"`
+	IsRunning   bool   `db:"is_running" json:"status"`
+	ServiceList string `db:"service_list" json:"service_list"`
+}
+
+func (l *deployHostList) GetInspectNodeInfoByClusterId(clusterId int) ([]HostInspectInfo, error) {
+	var list []HostInspectInfo
+	query := fmt.Sprintf("select deploy_host.ip as ip," +
+		"IF(TIMESTAMPDIFF(MINUTE,deploy_host.updated,NOW())<3,true,false) as is_running, " +
+		"IFNULL(GROUP_CONCAT(DISTINCT(concat(deploy_product_list.product_name,'-',deploy_instance_list.service_name))),'') as service_list " +
+		"from deploy_host " +
+		"left join deploy_cluster_host_rel host_rel on deploy_host.sid = host_rel.sid " +
+		"left join deploy_instance_list on deploy_host.sid = deploy_instance_list.sid " +
+		"left join deploy_product_list on deploy_instance_list.pid = deploy_product_list.id " +
+		"where clusterId = ? and isDeleted = 0 " +
+		"group by deploy_host.ip")
+	err := l.GetDB().Select(&list, query, clusterId)
+	if err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+func (l *deployHostList) GetHostRunningInfoListByClusterId(clusterId int) ([]HostRunningInfo, error) {
+	query := "SELECT deploy_host.id,mem_size,mem_usage,disk_usage,cpu_cores,cpu_usage,load1,local_ip,deploy_host.status,deploy_host.updated " +
+		"FROM deploy_cluster_host_rel " +
+		"LEFT JOIN deploy_host ON deploy_cluster_host_rel.sid = deploy_host.sid " +
+		"LEFT JOIN sidecar_list ON sidecar_list.id = deploy_host.sid " +
+		"WHERE deploy_cluster_host_rel.clusterId = ? and deploy_cluster_host_rel.is_deleted = 0"
+	list := make([]HostRunningInfo, 0)
+	if err := l.GetDB().Select(&list, query, clusterId); err != nil {
+		return nil, err
+	}
+	return list, nil
 }

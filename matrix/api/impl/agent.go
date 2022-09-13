@@ -1584,6 +1584,12 @@ func AgentHostDelete(ctx context.Context) apibase.Result {
 		//server_ip_node
 		model.ServiceIpNode{}.DeleteByIp(info.Ip)
 
+		//service_health_check
+		err = model.HealthCheck.DeleteByIp(info.Ip)
+		if err != nil {
+			return err
+		}
+
 		//schema_multi_fields
 		productServiceTupleList, err := model.SchemaMultiField.GetProductServiceByIp(clusterId, info.Ip)
 		if err != nil {

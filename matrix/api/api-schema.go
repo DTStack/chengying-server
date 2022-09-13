@@ -41,5 +41,7 @@ var ApiV2Schema = apibase.Route{
 		DashboardOperationEasyMatrixRoutes,
 		InspectReportEasyMatrixRoutes,
 		TaskOperationEasyMatrixAPIRoutes,
+		PlatformOperationEasyMatrixAPIRoutes,
+		ProductLineOperationEasyMatrixAPIRoutes,
 	},
 }

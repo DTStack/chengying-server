@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -71,8 +72,10 @@ func BackupDatabase(ctx context.Context) apibase.Result {
 	}
 	productName := ctx.Params().Get("product_name")
 	var productVersion = backupParam.TargetVersion
+	var isRollback bool
 	if CompareVersion(backupParam.SourceVersion, backupParam.TargetVersion) > 0 {
 		productVersion = backupParam.SourceVersion
+		isRollback = true
 	}
 	productInfo, err := model.DeployProductList.GetByProductNameAndVersion(productName, productVersion)
 	if err != nil {
@@ -86,6 +89,7 @@ func BackupDatabase(ctx context.Context) apibase.Result {
 			backupParam.TargetVersion, err)
 		return err
 	}
+	tx := model.USE_MYSQL_DB().MustBegin()
 	now := time.Now()
 	var backupScript, svc, errExecId string
 	var backupDbs, backupSqls []string
@@ -107,15 +111,17 @@ func BackupDatabase(ctx context.Context) apibase.Result {
 			if v, ok := svcConfig.Config[MysqlDb]; ok {
 				backupDbs = append(backupDbs, v.(schema.VisualConfig).String())
 			}
-			dependsDatabaseBytes, err := ioutil.ReadFile(filepath.Join(base.WebRoot, productName, productVersion,
-				svcName, DatabaseTxt))
-			if err != nil && !os.IsNotExist(err) {
-				log.Errorf("BackupDatabase-ReadDependDatabase error: %v", err)
-				return err
-			}
-			dependDatabases := strings.Split(string(dependsDatabaseBytes), ",")
-			if len(dependDatabases) > 0 {
-				backupDbs = append(backupDbs, dependDatabases...)
+			if !isRollback {
+				dependsDatabaseBytes, err := ioutil.ReadFile(filepath.Join(base.WebRoot, productName, productVersion,
+					svcName, DatabaseTxt))
+				if err != nil && !os.IsNotExist(err) {
+					log.Errorf("BackupDatabase-ReadDependDatabase error: %v", err)
+					return err
+				}
+				dependDatabases := strings.Split(string(dependsDatabaseBytes), ",")
+				if len(dependDatabases) > 0 {
+					backupDbs = append(backupDbs, dependDatabases...)
+				}
 			}
 			if len(backupDbs) > 0 {
 				deployInstances, _ := model.DeployInstanceList.GetInstanceBelongServiceWithNamespace(productName, svc, backupParam.ClusterId, "")
@@ -157,11 +163,15 @@ func BackupDatabase(ctx context.Context) apibase.Result {
 							log.Errorf("BackupDatabase-QueryBackupHistory db: %s, error: %v", dbName, err)
 							continue
 						}
-						if latestBackupInfo != nil && time.Since(latestBackupInfo.CreateTime) <= 1*time.Hour && strings.Split(strings.Split(latestBackupInfo.BackupSql, "/")[4], ":")[1] == backupParam.SourceVersion {
-							backupSqls = append(backupSqls, latestBackupInfo.BackupSql)
-							continue
-						} else {
+						if isRollback {
 							backupSqls = append(backupSqls, backupSql)
+						} else {
+							if latestBackupInfo != nil && time.Since(latestBackupInfo.CreateTime) <= 1*time.Hour {
+								backupSqls = append(backupSqls, latestBackupInfo.BackupSql)
+								continue
+							} else {
+								backupSqls = append(backupSqls, backupSql)
+							}
 						}
 						//生成 operationid 并且落库
 						operationId := uuid.NewV4().String()
@@ -189,7 +199,7 @@ func BackupDatabase(ctx context.Context) apibase.Result {
 							errExecId = execId
 							break
 						}
-						_, err = upgrade.BackupHistory.InsertRecord(backupParam.ClusterId, dbName, backupSql, productName)
+						_, err = upgrade.BackupHistory.InsertRecord(backupParam.ClusterId, dbName, backupSql, productName, tx)
 						if err != nil {
 							log.Errorf("BackupDatabase-InsertBackup dbName: %v, error: %v", dbName, err)
 							errExecId = execId
@@ -204,12 +214,18 @@ func BackupDatabase(ctx context.Context) apibase.Result {
 
 	result := &BackupResp{}
 	if errExecId != "" {
+		tx.Rollback()
 		result.Status = "fail"
 		result.ExecId = errExecId
 	} else {
-		result.Status = "success"
-		result.BackupName = now.Format(base.TsLayout)
-		result.BackupSqls = strings.Join(backupSqls, ",")
+		if err := tx.Commit(); err != nil {
+			result.Status = "fail"
+			result.ExecId = errExecId
+		} else {
+			result.Status = "success"
+			result.BackupName = now.Format(base.TsLayout)
+			result.BackupSqls = strings.Join(backupSqls, ",")
+		}
 	}
 	return result
 }
@@ -333,6 +349,7 @@ func SaveUpgrade(ctx context.Context) apibase.Result {
 		TargetVersion   string                 `json:"target_version"`
 		BackupName      string                 `json:"backup_name"`
 		BackupSqls      string                 `json:"backup_sqls"`
+		UpgradeMode     string                 `json:"upgrade_mode"`
 		ServiceIpList   []serviceIpInfo        `json:"service_ip_list"`
 		FieldModifyList []fieldModifyInfo      `json:"field_modify_list"`
 		FieldMultiList  []multiFieldModifyInfo `json:"field_multifield_list"`
@@ -345,7 +362,7 @@ func SaveUpgrade(ctx context.Context) apibase.Result {
 	serviceIpBytes, _ := json.Marshal(param.ServiceIpList)
 	fieldModifyBytes, _ := json.Marshal(param.FieldModifyList)
 	multiFieldBytes, _ := json.Marshal(param.FieldMultiList)
-	id, err := upgrade.UpgradeHistory.InsertRecord(param.ClusterId, enums.UpgradeType.Upgrade.Code, productName, param.SourceVersion,
+	id, err := upgrade.UpgradeHistory.InsertRecord(param.ClusterId, enums.UpgradeType.Upgrade.Code, param.UpgradeMode, productName, param.SourceVersion,
 		param.TargetVersion, param.BackupName, param.BackupSqls, serviceIpBytes, fieldModifyBytes, multiFieldBytes)
 	if err != nil {
 		log.Errorf("SaveUpgrade-InsertRecord error: %v", err)
@@ -365,12 +382,13 @@ func RollbackVersions(ctx context.Context) apibase.Result {
 	param := struct {
 		ClusterId      int    `json:"cluster_id"`
 		ProductVersion string `json:"product_version"`
+		UpgradeMode    string `json:"upgrade_mode"`
 	}{}
 	if err := ctx.ReadJSON(&param); err != nil {
 		log.Errorf("RollbackVersions-parse param error: %v", err)
 		return err
 	}
-	upgradeInfoList, err := upgrade.UpgradeHistory.GetByClsAndProductNameAndSourceVersion(param.ClusterId, productName, "")
+	upgradeInfoList, err := upgrade.UpgradeHistory.GetByClsAndProductNameAndSourceVersion(param.ClusterId, productName, "", param.UpgradeMode)
 	if err != nil {
 		log.Errorf("RollbackVersions-query db error: %v", err)
 		return err
@@ -391,9 +409,17 @@ func RollbackVersions(ctx context.Context) apibase.Result {
 }
 
 func CanRollback(clusterId int, productName, productVersion string) bool {
-	upgradeInfoList, err := upgrade.UpgradeHistory.GetByClsAndProductNameAndSourceVersion(clusterId, productName, "")
+	_, err := model.DeployClusterSmoothUpgradeProductRel.GetCurrentProductByProductNameClusterId(productName, clusterId)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Errorf("query db error: %v", err)
+		return false
+	}
+	if err == nil {
+		return false
+	}
+	upgradeInfoList, err := upgrade.UpgradeHistory.GetByClsAndProductNameAndSourceVersion(clusterId, productName, "", "")
 	if err != nil {
-		log.Errorf("RollbackVersions-query db error: %v", err)
+		log.Errorf("query db error: %v", err)
 		return false
 	}
 	for _, upgradeInfo := range upgradeInfoList {
@@ -418,13 +444,14 @@ func BackupTimes(ctx context.Context) apibase.Result {
 	param := struct {
 		ClusterId     int    `json:"cluster_id"`
 		TargetVersion string `json:"target_version"`
+		UpgradeMode   string `json:"upgrade_mode"`
 	}{}
 	if err := ctx.ReadJSON(&param); err != nil {
 		log.Errorf("BackupTimes-parse param error: %v", err)
 		return err
 	}
 	upgradeInfoList, err := upgrade.UpgradeHistory.GetByClsAndProductNameAndSourceVersion(param.ClusterId, productName,
-		param.TargetVersion)
+		param.TargetVersion, param.UpgradeMode)
 	if err != nil {
 		log.Errorf("BackupTimes-query db error: %v", err)
 		return err
@@ -616,7 +643,7 @@ func Rollback(ctx context.Context) (rlt apibase.Result) {
 	if uncheckedServiceInfo.UncheckedServices != "" {
 		unchecked = strings.Split(uncheckedServiceInfo.UncheckedServices, ",")
 	}
-	deployUUID := DealDeploy(productName, param.TargetVersion, unchecked, userId, param.ClusterId, 2)
+	deployUUID := DealDeploy(productName, param.TargetVersion, param.SourceVersion, unchecked, userId, param.ClusterId, 2, false)
 	return deployUUID
 }
 

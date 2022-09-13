@@ -5,10 +5,10 @@ log.max-logger-backups: 3
 log.days-to-keep: 1
 
 # databases
-mysqldb.host: 127.0.0.1
+mysqldb.host: 172.16.82.176
 mysqldb.port: 3306
 mysqldb.user: root
-mysqldb.password: 123456
+mysqldb.password: DT#passw0rd2019
 mysqldb.dbname: dtagent
 
 # api
@@ -29,5 +29,5 @@ verify.code: false
 
 deploy.install-path: /opt/dtstack/
 
-prometheus.node-exporter-port: 9101
+prometheus.node-exporter-port: 9100
 

@@ -72,16 +72,18 @@ var TaskLogList = &taskLogList{
 }
 
 type TaskInfo struct {
-	ID         int    `db:"id" json:"id"`
-	Name       string `db:"name" json:"name"`
-	Describe   string `db:"describe" json:"describe"`
-	Spec       string `db:"spec" json:"spec"`
-	Status     int    `db:"status" json:"status"`
-	Hosts      []ResHostInfo
-	ExecType   int
-	CreateTime dbhelper.NullTime `db:"create_time" json:"create_time"`
-	UpdateTime dbhelper.NullTime `db:"update_time" json:"update_time"`
-	IsDeleted  int               `db:"is_deleted" json:"is_deleted"`
+	ID           int    `db:"id" json:"id"`
+	Name         string `db:"name" json:"name"`
+	Describe     string `db:"describe" json:"describe"`
+	Spec         string `db:"spec" json:"spec"`
+	ExecTimeout  int    `db:"exec_timeout" json:"exec_timeout"`
+	LogRetention int    `db:"log_retention" json:"log_retention"`
+	Status       int    `db:"status" json:"status"`
+	Hosts        []ResHostInfo
+	ExecType     int
+	CreateTime   dbhelper.NullTime `db:"create_time" json:"create_time"`
+	UpdateTime   dbhelper.NullTime `db:"update_time" json:"update_time"`
+	IsDeleted    int               `db:"is_deleted" json:"is_deleted"`
 }
 
 type TaskHost struct {
@@ -112,14 +114,16 @@ type TaskLog struct {
 	EndTime     dbhelper.NullTime `db:"end_time" json:"end_time"`
 }
 
-func (l *taskList) InsertTaskIfNotExist(name, describe, spec string) (error, int) {
+func (l *taskList) InsertTaskIfNotExist(name, describe, spec string, execTimeout, logRetention int) (error, int) {
 	info := TaskInfo{}
 	err := l.GetWhere(nil, dbhelper.MakeWhereCause().Equal("name", name).And().Equal("is_deleted", 0), &info)
 	if err != nil && err == sql.ErrNoRows {
 		ret, err := l.InsertWhere(dbhelper.UpdateFields{
-			"name":     name,
-			"describe": describe,
-			"spec":     spec,
+			"name":          name,
+			"describe":      describe,
+			"spec":          spec,
+			"exec_timeout":  execTimeout,
+			"log_retention": logRetention,
 		})
 		if err != nil {
 			apibase.ThrowDBModelError(err)
@@ -329,9 +333,13 @@ func (l *taskLogList) UpdateTaskLogById(logId int64, status Status, result strin
 	return err
 }
 
-func (l *taskLogList) GetOperationIdByTaskId(taskId int, pagination *apibase.Pagination) ([]TaskLog, int) {
+func (l *taskLogList) GetOperationIdByTaskId(taskId int, execStatus string, pagination *apibase.Pagination) ([]TaskLog, int) {
 	whereCause := dbhelper.WhereCause{}
 	whereCause = whereCause.Equal("task_id", taskId)
+	if execStatus != "" {
+		whereCause = whereCause.And()
+		whereCause = whereCause.Equal("exec_status", execStatus)
+	}
 	where, value := whereCause.SQL()
 	query := "SELECT operation_id FROM " + TBL_TASK_LOG + " " + where + " " + "GROUP BY operation_id " + pagination.AsQuery()
 	queryCount := "SELECT COUNT(*) FROM " + "(SELECT operation_id FROM task_log " + where + " GROUP BY operation_id) AS t"

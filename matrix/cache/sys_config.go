@@ -47,6 +47,8 @@ func InitSysConfig() {
 
 			sysConfig: &sysConfig{
 				&PlatFormSecurity{},
+				&GlobalConfig{},
+				&InspectConfig{},
 			},
 		}
 		SysConfig.flushSysConfigManage()
@@ -99,8 +101,20 @@ type SysConfigData struct {
 	IsDelete    int            `db:"is_delete"`
 }
 
+type InspectConfig struct {
+	FullGCTime     int `sys:"fullGC_time" json:"fullGC_time"`
+	FullGCFreq     int `sys:"fullGC_frequency" json:"fullGC_frequency"`
+	DirSize        int `sys:"dir_size" json:"dir_size"`
+	NodeCPUUsage   int `sys:"node_cpu_usage" json:"node_cpu_usage"`
+	NodeMEMUsage   int `sys:"node_mem_usage" json:"node_mem_usage"`
+	NodeDiskUsage  int `sys:"node_disk_usage" json:"node_disk_usage"`
+	NodeInodeUsage int `sys:"node_inode_usage" json:"node_inode_usage"`
+}
+
 type sysConfig struct {
 	*PlatFormSecurity `sys:"platformsecurity" json:"-"`
+	*GlobalConfig     `sys:"globalconfig" json:"-"`
+	*InspectConfig    `sys:"inspectconfig" json:"-"`
 }
 
 // type support [string int []string []int]
@@ -111,6 +125,11 @@ type PlatFormSecurity struct {
 	AccountLoginLockSwitch int    `sys:"account_login_lock_switch" json:"account_login_lock_switch"`
 	AccountLoginLimitError int    `sys:"account_login_limit_error" json:"account_login_limit_error"`
 	AccountLoginLockTime   int    `sys:"account_login_lock_time" json:"account_login_lock_time"`
+}
+
+type GlobalConfig struct {
+	ServiceInstallTimeoutLimit uint16 `sys:"service_install_timeout_limit" json:"service_install_timeout_limit"`
+	AutoTestTimeoutLimit       uint16 `sys:"auto_test_timeout_limit" json:"auto_test_timeout_limit"`
 }
 
 // sync to db and flush cache
@@ -130,6 +149,49 @@ func (sm *sysConfigManage) UpdatePlatFormSecurity(data PlatFormSecurity) error {
 	err := sysConfigDatalist.modifySysConfigData(dataMap)
 	if err != nil {
 		log.Errorf("[sysConfigManage.modifySysConfigData] %s", err)
+		return err
+	}
+	sm.flushSysConfigManage()
+	return nil
+}
+
+func (sm *sysConfigManage) UpdateGloablConfig(data GlobalConfig) error {
+	var (
+		sVal    = reflect.ValueOf(data)
+		sType   = reflect.TypeOf(data)
+		dataMap = make(map[string]string)
+		prefix  = "globalconfig."
+	)
+	for i := 0; i < sVal.NumField(); i++ {
+		k := sType.Field(i).Tag.Get(sm.splitKey)
+		val := fmt.Sprintf("%v", sVal.Field(i).Interface())
+		dataMap[prefix+k] = fmt.Sprintf("%v", val)
+	}
+	log.Infof("[sysConfigManage.UpdateGlobalConfig] %s", dataMap)
+	err := sysConfigDatalist.modifySysConfigData(dataMap)
+	if err != nil {
+		log.Errorf("[sysConfigManage.UpdateGlobalConfig] %s", err)
+		return err
+	}
+	sm.flushSysConfigManage()
+	return nil
+}
+func (sm *sysConfigManage) UpdateInspectConfig(data InspectConfig) error {
+	var (
+		sVal    = reflect.ValueOf(data)
+		sType   = reflect.TypeOf(data)
+		dataMap = make(map[string]string)
+		prefix  = "inspectconfig."
+	)
+	for i := 0; i < sVal.NumField(); i++ {
+		k := sType.Field(i).Tag.Get(sm.splitKey)
+		val := fmt.Sprintf("%v", sVal.Field(i).Interface())
+		dataMap[prefix+k] = fmt.Sprintf("%v", val)
+	}
+	log.Infof("[sysConfigManage.UpdateInspectConfig] %s", dataMap)
+	err := sysConfigDatalist.modifySysConfigData(dataMap)
+	if err != nil {
+		log.Errorf("[sysConfigManage.UpdateInspectConfig] %s", err)
 		return err
 	}
 	sm.flushSysConfigManage()
@@ -186,6 +248,20 @@ func (sm *sysConfigManage) traverse(target interface{}) {
 					if v, err := strconv.Atoi(v); err == nil {
 						field.Set(reflect.ValueOf(v))
 					}
+				case reflect.Uint16:
+					u, err := strconv.ParseUint(v, 10, 32)
+					if err != nil {
+						log.Errorf("%s not unit", v)
+						break
+					}
+					field.Set(reflect.ValueOf(uint16(u)))
+				case reflect.Uint32:
+					u, err := strconv.ParseUint(v, 10, 32)
+					if err != nil {
+						log.Errorf("%s not unit", v)
+						break
+					}
+					field.Set(reflect.ValueOf(uint32(u)))
 				case reflect.Slice:
 					if field.Type().Elem().Kind() == reflect.Int {
 						op := []int{}

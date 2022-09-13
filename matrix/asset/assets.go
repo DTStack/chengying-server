@@ -31,7 +31,6 @@
 // templates/net-check.sh
 // templates/patchupdate.sh
 // templates/role-permissions.yml
-// templates/role-permissions2.yml
 // templates/selfbuild-component-v1beta1.yml
 // templates/selfbuild-component.yml
 // DO NOT EDIT!
@@ -119,7 +118,7 @@ func templatesCheckAgentExitSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/check-agent-exit.sh", size: 891, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/check-agent-exit.sh", size: 891, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -176,7 +175,7 @@ func templatesClusterNetCheckSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/cluster-net-check.sh", size: 731, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/cluster-net-check.sh", size: 731, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -205,7 +204,7 @@ func templatesDockerEnvironmentInitSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/docker.environment.init.sh", size: 291, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/docker.environment.init.sh", size: 291, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -610,7 +609,7 @@ func templatesEnvironmentInitSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/environment.init.sh", size: 12718, mode: os.FileMode(420), modTime: time.Unix(1629165397, 0)}
+	info := bindataFileInfo{name: "templates/environment.init.sh", size: 12718, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -665,7 +664,7 @@ func templatesHealthCheckSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/health-check.sh", size: 594, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/health-check.sh", size: 594, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -1260,7 +1259,7 @@ func templatesImportClusterResourceV1beta1Yml() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/import-cluster-resource-v1beta1.yml", size: 29601, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/import-cluster-resource-v1beta1.yml", size: 29601, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -2109,7 +2108,7 @@ func templatesImportClusterResourceYml() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/import-cluster-resource.yml", size: 40146, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/import-cluster-resource.yml", size: 40146, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -2193,7 +2192,7 @@ func templatesImportNsResouceYml() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/import-ns-resouce.yml", size: 1314, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/import-ns-resouce.yml", size: 1314, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -2213,6 +2212,7 @@ app_dir='{{.AGENT_DIR}}'
 agent_bin='{{.AGENT_BIN}}'
 run_user='{{.RUN_USER}}'
 data_dir='{{.DATA_DIR}}'
+unzip_tmp_dir='/opt/dtstack/tmp'
 
 #安装包下载地址
 DOWNLOAD_URL='{{.AGENT_DOWNLOAD_URL}}'
@@ -2222,14 +2222,17 @@ trap '[ "$?" -eq 0 ] || read -p "Looks like something went wrong in step ´$STEP
 ##install the filebeat##
 install_agent() {
     mkdir -p "$app_dir"
-    unzip -o "/tmp/$agent_zip" -d "$app_dir"  >/dev/null 2>&1
+    unzip -o "$unzip_tmp_dir/$agent_zip" -d "$app_dir"  >/dev/null 2>&1
 }
 
 ##download and installed##
 install(){
     STEP='install agent'
     echo "Use the curl download and install Please Waiting..."
-    cd /tmp/ && curl -L -O -s "$DOWNLOAD_URL"
+    if [ ! -d "$unzip_tmp_dir" ];then
+        sudo mkdir -p $unzip_tmp_dir
+    fi
+    cd "$unzip_tmp_dir" && sudo curl -L -O -s "$DOWNLOAD_URL"
     install_agent
 
     if [ ! -f "$agent_bin" ];then
@@ -2263,7 +2266,7 @@ chowns(){
 ##delete filebeat pkg##
 delete(){
     STEP='delete'
-    cd /tmp/ && rm -f "$agent_zip"
+    cd "$unzip_tmp_dir" && sudo rm -f "$agent_zip"
 }
 
 install
@@ -2281,7 +2284,7 @@ func templatesInstallAgentxSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/install.agentx.sh", size: 1512, mode: os.FileMode(420), modTime: time.Unix(1629165397, 0)}
+	info := bindataFileInfo{name: "templates/install.agentx.sh", size: 1669, mode: os.FileMode(420), modTime: time.Unix(1651215709, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -2359,7 +2362,7 @@ func templatesInstallScriptWrapperSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/install.script.wrapper.sh", size: 1477, mode: os.FileMode(420), modTime: time.Unix(1629165397, 0)}
+	info := bindataFileInfo{name: "templates/install.script.wrapper.sh", size: 1477, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -2394,7 +2397,7 @@ func templatesListFilesSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/list-files.sh", size: 725, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/list-files.sh", size: 725, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -2510,7 +2513,7 @@ func templatesNetCheckSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/net-check.sh", size: 2272, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/net-check.sh", size: 2272, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -2568,12 +2571,12 @@ func templatesPatchupdateSh() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/patchupdate.sh", size: 1075, mode: os.FileMode(420), modTime: time.Unix(1629165397, 0)}
+	info := bindataFileInfo{name: "templates/patchupdate.sh", size: 1075, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
 
-var _templatesRolePermissionsYml = []byte(`# 1: Administrator, 2: Cluster Operator, 4: Cluster Reader
+var _templatesRolePermissionsYml = []byte(`# 1: Administrator, 3: Cluster Operator, 7: Cluster Reader
 
 ---
 permissions:
@@ -2624,7 +2627,7 @@ permissions:
             code: 'service_dashboard_view'
             permission: 7
             children: []
-          - title:  配置主机关联
+          - title: 配置主机关联
             code: 'sub_menu_scheme_host_associated'
             permission: 1
             children: []
@@ -2907,9 +2910,41 @@ permissions:
         code: 'menu_security_audit'
         permission: 7
         children: []
+      - title: 部署信息下载
+        code: 'menu_deploy_info_markdown_download'
+        permission: 3
+        children: []
   - title: 系统配置
     code: 'menu_system_configuration'
     permission: 1
+    children:
+      - title: 平台安全
+        code: 'sub_menu_configuration_platformsecurity_config'
+        permission: 1
+        children:
+          - title: 查看
+            code: 'sub_menu_configuration_platformsecurity_config_view'
+            permission: 1
+            children: []
+          - title: 编辑
+            code: 'sub_menu_configuration_platformsecurity_config_edit'
+            permission: 1
+            children: []
+      - title: 全局配置
+        code: 'sub_menu_configuration_global_config'
+        permission: 3
+        children:
+          - title: 查看
+            code: 'sub_menu_configuration_global_config_view'
+            permission: 3
+            children: []
+          - title: 编辑
+            code: 'sub_menu_configuration_global_config_edit'
+            permission: 3
+            children: []
+  - title: 平台管理
+    code: 'menu_platform_manager'
+    permission: 7
     children:
       - title: 备份配置
         code: 'sub_menu_configuration_backup_config'
@@ -2923,26 +2958,10 @@ permissions:
             code: 'sub_menu_backup_config_view'
             permission: 1
             children: []
-      - title: 平台安全
-        code: 'sub_menu_configuration_platformsecurity_config'
-        permission: 1
-        children:
-          - title: 查看
-            code: 'sub_menu_configuration_platformsecurity_config_view'
-            permission: 1
-            children: []
-          - title: 编辑
-            code: 'sub_menu_configuration_platformsecurity_config_edit'
-            permission: 1
-            children: []
-  - title: 平台管理
-    code: 'menu_platform_manager'
-    permission: 7
-    children:
       - title: 脚本管理
         code: 'sub_menu_platform_manager_scriptManager'
         permission: 7
-        children: 
+        children:
           - title: 查看
             code: 'sub_menu_platform_manager_scriptManager_view'
             permission: 7
@@ -2951,6 +2970,18 @@ permissions:
             code: 'sub_menu_configuration_platformsecurity_edit'
             permission: 3
             children: []
+  - title: 集群巡检
+    code: 'sub_menu_platform_manager_cluster_inspection'
+    permission: 7
+    children:
+      - title: 查看
+        code: 'sub_menu_platform_manager_cluster_inspection_view'
+        permission: 7
+        children: [ ]
+      - title: 编辑
+        code: 'sub_menu_platform_manager_cluster_inspection_edit'
+        permission: 3
+        children: [ ]
 `)
 
 func templatesRolePermissionsYmlBytes() ([]byte, error) {
@@ -2963,7 +2994,7 @@ func templatesRolePermissionsYml() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/role-permissions.yml", size: 9430, mode: os.FileMode(420), modTime: time.Unix(1629430113, 0)}
+	info := bindataFileInfo{name: "templates/role-permissions.yml", size: 13227, mode: os.FileMode(420), modTime: time.Unix(1652840620, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -3771,7 +3802,7 @@ func templatesSelfbuildComponentV1beta1Yml() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/selfbuild-component-v1beta1.yml", size: 35215, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/selfbuild-component-v1beta1.yml", size: 35215, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }
@@ -4578,7 +4609,7 @@ func templatesSelfbuildComponentYml() (*asset, error) {
 		return nil, err
 	}
 
-	info := bindataFileInfo{name: "templates/selfbuild-component.yml", size: 36636, mode: os.FileMode(420), modTime: time.Unix(1628232703, 0)}
+	info := bindataFileInfo{name: "templates/selfbuild-component.yml", size: 36636, mode: os.FileMode(420), modTime: time.Unix(1638428450, 0)}
 	a := &asset{bytes: bytes, info: info}
 	return a, nil
 }

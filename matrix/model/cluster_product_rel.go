@@ -18,6 +18,7 @@
 package model
 
 import (
+	"database/sql"
 	apibase "dtstack.com/dtstack/easymatrix/go-common/api-base"
 	"dtstack.com/dtstack/easymatrix/go-common/db-helper"
 	"fmt"
@@ -231,17 +232,17 @@ func (d *deployClusterProductRel) GetDeployClusterProductList(
 		"LEFT JOIN deploy_product_list as p ON p.id = r.pid " +
 		"WHERE r.clusterId = ?  AND r.is_deleted=0 "
 
-	if len(deployStatus) > 0 {
-		query += " AND r.status IN ("
-		for i, v := range deployStatus {
-			if i > 0 {
-				query += ",'" + v + "'"
-			} else {
-				query += "'" + v + "'"
-			}
-		}
-		query += ")"
-	}
+	//if len(deployStatus) > 0 {
+	//	query += " AND r.status IN ("
+	//	for i, v := range deployStatus {
+	//		if i > 0 {
+	//			query += ",'" + v + "'"
+	//		} else {
+	//			query += "'" + v + "'"
+	//		}
+	//	}
+	//	query += ")"
+	//}
 
 	//distinguish k8s multiple namespaces
 	if namespace != "" {
@@ -273,9 +274,9 @@ func (d *deployClusterProductRel) GetDeployClusterProductList(
 		query += " AND p.product_name=" + "'" + productName + "'"
 	}
 
-	if productVersionLike != "" {
-		query += " AND p.product_version like" + "'%" + productVersionLike + "%'"
-	}
+	//if productVersionLike != "" {
+	//	query += " AND p.product_version like" + "'%" + productVersionLike + "%'"
+	//}
 
 	if productVersion != "" {
 		query += " AND p.product_version=" + "'" + productVersion + "'"
@@ -306,4 +307,51 @@ func (d *deployClusterProductRel) GetDeployClusterProductList(
 		list = append(list, info)
 	}
 	return list, err
+}
+
+type DeployArchHostInfo struct {
+	MemSize            int64          `db:"mem_size"`
+	DiskUsage          sql.NullString `db:"disk_usage"`
+	CpuCores           int            `db:"cpu_cores"`
+	DiskSizeDisplay    string
+	CpuCoreSizeDisplay string
+	FileSizeDisplay    string
+	IP                 string `db:"ip"`
+	HostName           string `db:"hostname"`
+	OSDisplay          string `db:"os_display"`
+	MemSizeDisplay     string
+}
+
+func (l *deployClusterProductRel) GetDeployArchInfo() ([]DeployArchHostInfo, error) {
+
+	hostsList := make([]DeployArchHostInfo, 0)
+	query := fmt.Sprintf("select dh.ip,dh.hostname,cpu_cores,mem_size,disk_usage,concat(os_platform,os_version) as os_display " +
+		"from deploy_cluster_host_rel dchr " +
+		"left join deploy_host dh on dchr.sid = dh.sid " +
+		"left join sidecar_list sl on sl.id = dh.sid " +
+		"where dchr.is_deleted = 0 order by dchr.id asc")
+	if err := USE_MYSQL_DB().Select(&hostsList, query); err != nil {
+		return nil, fmt.Errorf("[GetDeployArchInfo] Database err: %v", err)
+	}
+	return hostsList, nil
+}
+
+type DeployVersionStruct struct {
+	Pid            int    `db:"pid"`
+	ProductName    string `db:"product_name"`
+	ProductVersion string `db:"product_version"`
+}
+
+func (l *deployClusterProductRel) GetDeployVersionInfo() ([]DeployVersionStruct, error) {
+	ProductList := make([]DeployVersionStruct, 0)
+	query := fmt.Sprintf("select r.pid,p.product_name, p.product_version " +
+		"from deploy_cluster_product_rel as r " +
+		"left join deploy_product_list as p on p.id = r.pid " +
+		"where r.is_deleted=0 and r.status = ? " +
+		"group by  p.product_name,p.product_version " +
+		"order by p.product_name,p.product_version")
+	if err := USE_MYSQL_DB().Select(&ProductList, query, "deployed"); err != nil {
+		return nil, fmt.Errorf("[GetDeployVersionInfo] Database err: %v", err)
+	}
+	return ProductList, nil
 }

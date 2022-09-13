@@ -22,65 +22,61 @@ import (
 	"dtstack.com/dtstack/easymatrix/matrix/api/impl"
 )
 
-var CommonOperationEasyMatrixAPIRoutes = apibase.Route{
-	Path: "common",
+var PlatformOperationEasyMatrixAPIRoutes = apibase.Route{
+	Path: "platform",
 	SubRoutes: []apibase.Route{
 		{
-			Path: "file2text",
-			POST: impl.File2text,
-			Docs: apibase.Docs{
-				GET: &apibase.ApiDoc{
-					Name: "upload file convert to text[EasyMatrix API]",
-				},
-			},
-		}, {
-			Path: "safetyAudit",
+			Path: "inspect",
 			SubRoutes: []apibase.Route{
 				{
-					Path: "list",
-					GET:  impl.GetSafetyAuditList,
-					Docs: apibase.Docs{
-						GET: &apibase.ApiDoc{
-							Name: "get safety audit list[EasyMatrix API]",
+					Path: "baseInfo",
+					SubRoutes: []apibase.Route{
+						{
+							Path: "name_node",
+							GET:  impl.GetPlatformInspectNameNodeBaseInfo,
+							Docs: apibase.Docs{
+								GET: &apibase.ApiDoc{
+									Name: "get inspect name_node baseInfo[EasyMatrix API]",
+								},
+							},
+						}, {
+							Path: "status",
+							GET:  impl.GetPlatformInspectBaseInfoState,
+							Docs: apibase.Docs{
+								GET: &apibase.ApiDoc{
+									Name: "get inspect baseInfo[EasyMatrix API]",
+								},
+							},
 						},
 					},
 				}, {
-					Path: "module",
-					GET:  impl.GetSafetyAuditModule,
+					Path: "graph/config",
+					GET:  impl.GetPlatformGraphConfig,
 					Docs: apibase.Docs{
 						GET: &apibase.ApiDoc{
-							Name: "get safety audit module[EasyMatrix API]",
+							Name: "get graph config [EasyMatrix API]",
 						},
 					},
 				}, {
-					Path: "operation",
-					GET:  impl.GetSafetyAuditOperation,
-					Docs: apibase.Docs{
-						GET: &apibase.ApiDoc{
-							Name: "get safety audit operation[EasyMatrix API]",
-						},
-					},
-				},
-			},
-		}, {
-			Path: "deployInfo",
-			SubRoutes: []apibase.Route{
-				{
-					//api/v2/common/deployInfo/generate
-					Path: "generate",
-					POST: impl.DeployInfoGenerate,
-					Docs: apibase.Docs{
-						GET: &apibase.ApiDoc{
-							Name: "部署信息markdown文件生成",
+					Path: "statisticsConfig",
+					GET:  impl.GetInspectConfig,
+					SubRoutes: []apibase.Route{
+						{
+							Path: "update",
+							POST: impl.ModifyInspectConfig,
+							Docs: apibase.Docs{
+								GET: &apibase.ApiDoc{
+									Name: "update inspect config [EasyMatrix API]",
+								},
+							},
 						},
 					},
 				}, {
-					//api/v2/common/deployInfo/download
-					Path: "download",
-					GET:  impl.DeployInfoDownload,
+					Path: "form/data",
+					GET:  impl.GetPlatformInspectFormData,
 					Docs: apibase.Docs{
 						GET: &apibase.ApiDoc{
-							Name: "部署信息markdown文件下载",
+							Name: "get form data by form title[EasyMatrix API]",
 						},
 					},
 				},

@@ -506,6 +506,221 @@
                 }
             }
         },
+        "/api/v2/common/deployInfo/download": {
+            "get": {
+                "description": "部署信息文档下载",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "common"
+                ],
+                "summary": "部署信息文档下载",
+                "responses": {
+                    "200": {
+                        "description": "{\"msg\":\"ok\",\"code\":0,\"data\":{}}",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v2/common/deployInfo/generate": {
+            "post": {
+                "description": "生成部署信息文档",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "common"
+                ],
+                "summary": "生成部署信息文档",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "EM 版本号",
+                        "name": "em_version",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "{\"msg\":\"ok\",\"code\":0,\"data\":{}}",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v2/platform/inspect/baseInfo/name_node": {
+            "get": {
+                "description": "大数据运行服务基础信息",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Inspect"
+                ],
+                "summary": "大数据运行服务基础信息",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Cluster ID",
+                        "name": "cluster_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/impl.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v2/platform/inspect/baseInfo/status": {
+            "get": {
+                "description": "获取巡检报告基本信息",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Inspect"
+                ],
+                "summary": "获取巡检报告基本信息",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Cluster ID",
+                        "name": "cluster_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/impl.Result"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v2/platform/inspect/form/data": {
+            "get": {
+                "description": "获取巡检报告表格信息",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Inspect"
+                ],
+                "summary": "获取巡检报告表格信息",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Cluster ID",
+                        "name": "cluster_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "form_title",
+                        "name": "form_title",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/impl.FromStruct"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v2/platform/inspect/graph/config": {
+            "get": {
+                "description": "获取图表配置列表",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Inspect"
+                ],
+                "summary": "获取图表配置列表",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Cluster ID",
+                        "name": "cluster_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/model.BaseTemplateConfig"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v2/platform/inspect/graph/config/update": {
+            "post": {
+                "description": "修改巡检报告统计配置",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Inspect"
+                ],
+                "summary": "修改巡检报告统计配置",
+                "responses": {
+                    "200": {
+                        "description": "{\"msg\":\"ok\",\"code\":0,\"data\":{}}",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v2/platform/inspect/statisticsConfig": {
+            "get": {
+                "description": "获取巡检报告统计配置",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Inspect"
+                ],
+                "summary": "获取巡检报告统计配置",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/cache.InspectConfig"
+                        }
+                    }
+                }
+            }
+        },
         "/api/v2/product/backup": {
             "get": {
                 "description": "Get Cluster Service Backup",
@@ -1279,6 +1494,120 @@
         }
     },
     "definitions": {
+        "cache.InspectConfig": {
+            "type": "object",
+            "properties": {
+                "dir_size": {
+                    "type": "integer"
+                },
+                "fullGC_frequency": {
+                    "type": "integer"
+                },
+                "fullGC_time": {
+                    "type": "integer"
+                },
+                "node_cpu_usage": {
+                    "type": "integer"
+                },
+                "node_disk_usage": {
+                    "type": "integer"
+                },
+                "node_inode_usage": {
+                    "type": "integer"
+                },
+                "node_mem_usage": {
+                    "type": "integer"
+                }
+            }
+        },
+        "impl.FromStruct": {
+            "type": "object",
+            "properties": {
+                "form_head": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "form_value": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "impl.NodeInfo": {
+            "type": "object",
+            "properties": {
+                "agent_error_num": {
+                    "type": "integer"
+                },
+                "alerting_num": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "impl.Response": {
+            "type": "object",
+            "properties": {
+                "data_node_dead_nums": {
+                    "type": "integer"
+                },
+                "data_node_live_nums": {
+                    "type": "integer"
+                },
+                "data_node_mem": {
+                    "type": "string"
+                },
+                "hdfs_file_num": {
+                    "type": "integer"
+                },
+                "name_node_mem": {
+                    "type": "string"
+                }
+            }
+        },
+        "impl.Result": {
+            "type": "object",
+            "properties": {
+                "have_name_node": {
+                    "type": "integer"
+                },
+                "mysql_slave_status": {
+                    "type": "integer"
+                },
+                "node_status": {
+                    "$ref": "#/definitions/impl.NodeInfo"
+                },
+                "service_status": {
+                    "$ref": "#/definitions/impl.ServiceInfo"
+                }
+            }
+        },
+        "impl.ServiceInfo": {
+            "type": "object",
+            "properties": {
+                "alerting_num": {
+                    "type": "integer"
+                },
+                "healthy_check_error_num": {
+                    "type": "integer"
+                },
+                "host_down_num": {
+                    "type": "integer"
+                },
+                "running_fail_num": {
+                    "type": "integer"
+                }
+            }
+        },
         "impl.hostDeleteParam": {
             "type": "object",
             "properties": {
@@ -1326,6 +1655,29 @@
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "model.BaseTemplateConfig": {
+            "type": "object",
+            "properties": {
+                "decimal": {
+                    "type": "integer"
+                },
+                "metric": {
+                    "type": "string"
+                },
+                "module": {
+                    "type": "string"
+                },
+                "targets": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "integer"
+                },
+                "unit": {
+                    "type": "string"
                 }
             }
         },

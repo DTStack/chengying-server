@@ -712,8 +712,7 @@ func Identity(ctx context.Context) apibase.Result {
 }
 
 func GetSysconfigPlatformSecurity(ctx context.Context) apibase.Result {
-	security := cache.SysConfig.GetSysconfig()
-	return security.PlatFormSecurity
+	return cache.SysConfig.PlatFormSecurity
 }
 
 func ModifySysconfigPlatformSecurity(ctx context.Context) apibase.Result {
@@ -744,8 +743,55 @@ func ModifySysconfigPlatformSecurity(ctx context.Context) apibase.Result {
 		return fmt.Errorf("account_login_limit_error need greater 0")
 	}
 	err := cache.SysConfig.UpdatePlatFormSecurity(request)
-	if err != nil {
-		log.Errorf("[sysConfigManage.modifySysConfigData] %s", err)
-	}
 	return err
+}
+
+func GetGlobalConfig(ctx context.Context) apibase.Result {
+	return cache.SysConfig.GlobalConfig
+}
+
+func ModifyGlobalConfig(ctx context.Context) apibase.Result {
+	var (
+		request = cache.GlobalConfig{}
+	)
+	if err := ctx.ReadJSON(&request); err != nil {
+		return errors.New("json body illegal")
+	}
+	if request.ServiceInstallTimeoutLimit == 0 {
+		return errors.New("time can't set zero")
+	}
+	err := cache.SysConfig.UpdateGloablConfig(request)
+	return err
+}
+
+// ModifyInspectConfig 	godoc
+// @Summary      	修改巡检报告统计配置
+// @Description  	修改巡检报告统计配置
+// @Tags         	Inspect
+// @Produce      	json
+// @Success      	200		{object} string	"{"msg":"ok","code":0,"data":{}}"
+// @Router       	/api/v2/platform/inspect/graph/config/update [post]
+func ModifyInspectConfig(ctx context.Context) apibase.Result {
+	var (
+		request = cache.InspectConfig{}
+	)
+	if err := ctx.ReadJSON(&request); err != nil {
+		return errors.New("json body illegal")
+	}
+	if request.FullGCTime <= 0 {
+		return errors.New("full gc time must be a positive integer")
+	}
+	err := cache.SysConfig.UpdateInspectConfig(request)
+	return err
+}
+
+// GetInspectConfig 	godoc
+// @Summary      	获取巡检报告统计配置
+// @Description  	获取巡检报告统计配置
+// @Tags         	Inspect
+// @Produce      	json
+// @Success      	200		{object} 	cache.InspectConfig
+// @Router       	/api/v2/platform/inspect/statisticsConfig [get]
+func GetInspectConfig(ctx context.Context) apibase.Result {
+	return cache.SysConfig.InspectConfig
 }

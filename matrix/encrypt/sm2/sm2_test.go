@@ -19,7 +19,6 @@ package sm2
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"github.com/tjfoc/gmsm/sm2"
@@ -27,108 +26,66 @@ import (
 	"testing"
 )
 
-var (
-	SM2 = NewSm2Encrypt()
-)
-
-func TestSm2PublicKeyInt(t *testing.T) {
-	pub := SM2.GetPubliKey()
-	x, _ := new(big.Int).SetString(pub[2:66], 16)
-	y, _ := new(big.Int).SetString(pub[66:], 16)
-	publicKey := sm2.PublicKey{
-		Curve: sm2.P256Sm2(),
-		X:     x,
-		Y:     y,
-	}
+func newSm2() (x, y string) {
 	var (
-		plainText = "qwer"
+		priv *sm2.PrivateKey
+		err  error
 	)
-	cipherText, err := publicKey.EncryptAsn1([]byte(plainText), rand.Reader)
+	priv, err = sm2.GenerateKey(rand.Reader) // 生成密钥对
 	if err != nil {
-		fmt.Println(err)
+		fmt.Printf("[sm2.GenerateKey] err: %v", err)
 	}
+	return fmt.Sprintf("04%x%x", priv.PublicKey.X, priv.PublicKey.Y), fmt.Sprintf("%x", priv.D)
+}
 
-	pri := SM2.GetPrivateKey()
-	d, _ := new(big.Int).SetString(pri[:], 16)
+func hexCode2Sm2(pb, pk string) *sm2.PrivateKey {
+	x, _ := new(big.Int).SetString(pb[2:66], 16)
+	y, _ := new(big.Int).SetString(pb[66:], 16)
+	d, _ := new(big.Int).SetString(pk[:], 16)
 	privatekey := &sm2.PrivateKey{
-		PublicKey: publicKey,
-		D:         d,
+		PublicKey: sm2.PublicKey{
+			Curve: sm2.P256Sm2(),
+			X:     x,
+			Y:     y,
+		},
+		D: d,
 	}
-	planiText, err := privatekey.DecryptAsn1(cipherText)
+	return privatekey
+}
+func encode(privatekey *sm2.PrivateKey) bool {
+	var (
+		value = "test"
+	)
+	encrypts1Str, err1 := privatekey.EncryptAsn1([]byte(value), rand.Reader)
+	decrypts1Str, err2 := privatekey.DecryptAsn1(encrypts1Str)
 
-	fmt.Println(string(planiText)) // qwer
+	msgHexDecode, _ := hex.DecodeString("04f0804c7844e7c5560052f7b8a65c12ab3a314a11e6cb78e019b9ff398b479d71bb75692bc3559c66e8de04fb5a37e0dd550856eef59de372924ead8f01fe2df7429f827066638b4796eac026c2e8f81115e7ffc44228c51b646ba6180816c589c5caaa40aceacc26af1aaa05c60899")
+	planiText, e := sm2.Decrypt(privatekey, msgHexDecode, 0)
+	fmt.Println(string(planiText), e)
+	enValue := string(decrypts1Str)
+	if err1 != nil || err2 != nil {
+		fmt.Printf("%s %v %v\n", enValue, err1, err2)
+		return false
+	}
+	return true
 }
 
-func TestParseWithKey(t *testing.T) {
-	var (
-		prk      = "ab41ceea04c0a7c643c29597452c156ef871b9afdf2b82fe35e1b6f70979df17"
-		pbk      = "0444b39f0a6e3c14ceefcbc283d70c20ad003e4bed20b5a8f8f207a6642b8b400b630f9c405d107b73cc8e5534efc3cab73e31e35cdaba3af07af3fecf50246298"
-		password = "54777d20c35fc3feb523925630a3daa2de79a076f3e405daf95c7affa5e9a6acf4fad58a5a9bdef8f70bedbd092c072541c1b7cc17fd0497149ead5fa55ac18affb5391ad02c3b35282f6a56ef073557da00b8d864b906be766547694d107431108d6330cda80bac40deb49fd0826a"
-	)
-	var (
-		x, _       = new(big.Int).SetString(pbk[2:66], 16)
-		y, _       = new(big.Int).SetString(pbk[66:], 16)
-		d, _       = new(big.Int).SetString(prk[:], 16)
-		privatekey = &sm2.PrivateKey{
-			PublicKey: sm2.PublicKey{
-				Curve: sm2.P256Sm2(),
-				X:     x,
-				Y:     y,
-			},
-			D: d,
+func TestBenchMark(t *testing.T) {
+	for k := 0; k < 100; k++ {
+		xS, yS := newSm2()
+		privatekey := hexCode2Sm2(xS, yS)
+		if !encode(privatekey) {
+			xS, yS := newSm2()
+			nPrivatekey := hexCode2Sm2(xS, yS)
+			if encode(nPrivatekey) {
+				fmt.Println("retry success")
+			} else {
+				fmt.Println("retry fail")
+			}
 		}
-	)
-	encrptDataHex := fmt.Sprintf("%x", password)
-	encrptDataHexDocode, _ := hex.DecodeString(encrptDataHex)
-	planiTexbt, err := sm2.Decrypt(privatekey, encrptDataHexDocode, 0)
-	if err != nil {
-		panic(err)
 	}
-	fmt.Println(string(planiTexbt))
-}
-
-func TestParseWithKeyHex(t *testing.T) {
-	da, _ := base64.StdEncoding.DecodeString("Bu9yfbVvUWWOPV6grq25Eb0yo/DWAgigWdJ50hmSIcVd3iYMbD9UXcjdmhuE+cTnoqYbLHmbHQPya5AB0zP5s4xiferrL1MXtdA9vWRWtCEa1RG5B+ZmwowsSrIaWZKdVhStBFZylX1p5JUIHCXH")
-	fmt.Println(string(da))
-	fmt.Printf("%x", da)
 }
 
 func TestName(t *testing.T) {
-	var msg = "1ay"
-	// pub 加密
-	e, _ := SM2.Encrypt([]byte(msg))
-	h := fmt.Sprintf("%x", e) //041abe3975272a65189f415a93012a086646f78904e550547c21ebf61aaddd83859cf224b134a3e4e1154476d6b47eef52919e441ac62aebad16c1a268a2f72ff84ca7c73c578e653e851b320d2bfce491c68f9ff1f3e89c6c8b79fd75dd65142f2c11e2
 
-	// pri 16进制字符串解密
-	str, _ := SM2.DecryptHexString([]byte(h))
-	fmt.Println(string(str))
-	// pri 切片解密
-	by, _ := SM2.DecryptByte(e)
-	fmt.Println(string(by))
-
-}
-
-func TestStr(t *testing.T) {
-	var (
-		prk      = "ab41ceea04c0a7c643c29597452c156ef871b9afdf2b82fe35e1b6f70979df17"
-		pbk      = "0444b39f0a6e3c14ceefcbc283d70c20ad003e4bed20b5a8f8f207a6642b8b400b630f9c405d107b73cc8e5534efc3cab73e31e35cdaba3af07af3fecf50246298"
-		password = "0454777d20c35fc3feb523925630a3daa2de79a076f3e405daf95c7affa5e9a6acf4fad58a5a9bdef8f70bedbd092c072541c1b7cc17fd0497149ead5fa55ac18affb5391ad02c3b35282f6a56ef073557da00b8d864b906be766547694d107431108d6330cda80bac40deb49fd0826a"
-	)
-
-	var (
-		x, _       = new(big.Int).SetString(pbk[2:66], 16)
-		y, _       = new(big.Int).SetString(pbk[66:], 16)
-		d, _       = new(big.Int).SetString(prk[:], 16)
-		privatekey = &sm2.PrivateKey{
-			PublicKey: sm2.PublicKey{
-				Curve: sm2.P256Sm2(),
-				X:     x,
-				Y:     y,
-			},
-			D: d,
-		}
-	)
-	msgHexDocode, _ := hex.DecodeString(string([]byte(password)))
-	planiText, err := sm2.Decrypt(privatekey, msgHexDocode, mode)
-	fmt.Println(string(planiText),err)
 }

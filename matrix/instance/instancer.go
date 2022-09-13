@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"database/sql"
 	dbhelper "dtstack.com/dtstack/easymatrix/go-common/db-helper"
+	"dtstack.com/dtstack/easymatrix/matrix/cache"
 	"dtstack.com/dtstack/easymatrix/matrix/enums"
 	"encoding/json"
 	"errors"
@@ -243,7 +244,9 @@ func (this *instance) Install(onlyAgent bool) (ret error) {
 		return this.handleError(model.INSTANCE_STATUS_INSTALL_FAIL, "schema instance invalid", this.sid, execId)
 	}
 	// 构建agent端部署参数(安装脚本、用户、应用目录、下载脚本、agentid等)
-	param := &agent.InstallParms{}
+	param := &agent.InstallParms{
+		Timeout: fmt.Sprintf("%dm", cache.SysConfig.GlobalConfig.ServiceInstallTimeoutLimit),
+	}
 	installEvent.InstallParam = param
 	param.Name = this.name
 	param.CollectorId = this.sid
@@ -341,7 +344,7 @@ func (this *instance) Install(onlyAgent bool) (ret error) {
 			}
 		}
 	}
-	if !onlyAgent && this.mode != 1 &&
+	if !onlyAgent && this.mode != 1 && this.mode != 3 &&
 		!this.isInstanceEmptyCar() &&
 		this.getInstanceSchema().Instance.PostDeploy != "" &&
 		this.mode != 1 {
@@ -368,7 +371,7 @@ func (this *instance) Install(onlyAgent bool) (ret error) {
 		}
 	}
 	//surpport upgrade
-	if this.mode == 1 &&
+	if this.mode == 1 || this.mode == 3 &&
 		!onlyAgent &&
 		!this.isInstanceEmptyCar() &&
 		this.getInstanceSchema().Instance.PostUpGrade != "" {
