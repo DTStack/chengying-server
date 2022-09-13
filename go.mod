@@ -4,7 +4,6 @@ go 1.14
 
 require (
 	github.com/Joker/jade v0.0.0-20161230135920-35b3f5bdbcc9 // indirect
-	github.com/a-urth/go-bindata v0.0.0-20180209162145-df38da164efc // indirect
 	github.com/ajg/form v1.5.1 // indirect
 	github.com/aymerick/raymond v0.0.0-20161209220724-72acac220747 // indirect
 	github.com/better0332/zip v0.0.0-20180913033841-455b25ec3929
@@ -58,11 +57,10 @@ require (
 	github.com/rancher/types v0.0.0-20200723224053-ae84b42a4797
 	github.com/satori/go.uuid v1.2.0
 	github.com/sethvargo/go-password v0.2.0
-	github.com/sirupsen/logrus v1.5.0
+	github.com/sirupsen/logrus v1.5.0 // indirect
 	github.com/smartystreets/goconvey v1.6.4
 	github.com/spf13/pflag v1.0.5
 	github.com/swaggo/files v0.0.0-20210815190702-a29dd2bc99b2
-	github.com/swaggo/http-swagger v1.2.5
 	github.com/swaggo/swag v1.7.9
 	github.com/tjfoc/gmsm v1.4.1
 	github.com/urfave/cli v1.20.0
@@ -74,6 +72,7 @@ require (
 	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
 	go.uber.org/zap v1.14.1
+	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/sys v0.0.0-20220207234003-57398862261d // indirect
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0
 	google.golang.org/genproto v0.0.0-20220207185906-7721543eae58 // indirect
@@ -88,7 +87,7 @@ require (
 	k8s.io/klog v1.0.0
 	k8s.io/utils v0.0.0-20200414100711-2df71ebbae66 // indirect
 	sigs.k8s.io/controller-runtime v0.6.0
-	sigs.k8s.io/controller-tools v0.4.1 // indirect
+	//sigs.k8s.io/controller-tools v0.4.1 // indirect
 	sigs.k8s.io/yaml v1.2.0
 )
 
