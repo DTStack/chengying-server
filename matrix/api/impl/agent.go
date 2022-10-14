@@ -19,6 +19,7 @@ package impl
 
 import (
 	"database/sql"
+	dbhelper "dtstack.com/dtstack/easymatrix/go-common/db-helper"
 	"dtstack.com/dtstack/easymatrix/matrix/encrypt"
 	"encoding/base64"
 	"encoding/json"
@@ -945,6 +946,7 @@ func HostInstallStepEnvInit(sid string, aid int) error {
 		log.Errorf("DeployHostList.GetHostInfoBySid error:%v", err)
 	}
 	//生成 operationid 并且落库
+	startTime := time.Now()
 	operationId := uuid.NewV4().String()
 	err = model.OperationList.Insert(model.OperationInfo{
 		ClusterId:       clusterHostRel.ClusterId,
@@ -965,6 +967,7 @@ func HostInstallStepEnvInit(sid string, aid int) error {
 	if err := host.AgentInstall.EnvironmentInit(sid, execId); err != nil {
 		log.Errorf("\t\tHostInstallStepEnvInit error: %v", err)
 		model.DeployHostList.UpdateStatus(aid, host.InitInitializeShFail, host.ERROR_HOST_INIT+","+err.Error())
+		model.OperationList.UpdateStatusByOperationId(operationId, enums.ExecStatusType.Failed.Code, dbhelper.NullTime{Time: time.Now(), Valid: true}, sql.NullFloat64{Float64: time.Now().Sub(startTime).Seconds(), Valid: true})
 		return err
 	}
 	model.DeployHostList.UpdateStatus(aid, host.InitInitializeShOk, host.SUCCESS_HOST_INIT)

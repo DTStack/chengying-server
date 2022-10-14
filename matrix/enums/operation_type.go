@@ -33,6 +33,7 @@ type operationType struct {
 	PatchUpdate       EnumValueType
 	ProductStart      EnumValueType
 	SvcStart          EnumValueType
+	SvcStop           EnumValueType
 	SvcRollingRestart EnumValueType
 	HostInit          EnumValueType
 	OpenKerberos      EnumValueType
@@ -105,5 +106,9 @@ var OperationType = operationType{
 	Rollback: EnumValueType{
 		Code: 10,
 		Desc: "回滚数据库",
+	},
+	SvcStop: EnumValueType{
+		Code: 11,
+		Desc: "服务停止",
 	},
 }
